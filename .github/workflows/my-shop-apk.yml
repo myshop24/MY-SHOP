@@ -1,4 +1,4 @@
-name: MY SHOP V-19 APK Build
+name: MY SHOP V-20 APK Build
 
 on:
   workflow_dispatch:
@@ -10,16 +10,15 @@ permissions:
   contents: read
 
 env:
-  # This is the V-19 ZIP that is actually present in the GitHub repository.
-  V19_ZIP: V-19_MY_SHOP_COMPILE_FIXED_V2.zip
+  V20_ZIP: V-20_MY_SHOP_RUNTIME_FIXED_SOURCE.zip
 
 jobs:
   build:
-    name: MY SHOP V-19 APK
+    name: MY SHOP V-20 APK
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-
       # ============================================================
       # 1. CHECKOUT
       # ============================================================
@@ -28,8 +27,6 @@ jobs:
 
       # ============================================================
       # 2. JAVA 17
-      # No Gradle cache here because the Android project is inside
-      # the ZIP and is extracted later.
       # ============================================================
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -47,31 +44,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-
           sdkmanager \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
       # ============================================================
-      # 4. VERIFY THE ONE V-19 SOURCE ZIP
+      # 4. VERIFY EXACT V-20 SOURCE ZIP
       # ============================================================
-      - name: Verify V-19 source ZIP
+      - name: Verify exact V-20 source ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Expected V-19 source:"
-          echo "$V19_ZIP"
-          echo
+          echo "Expected:"
+          echo "$V20_ZIP"
 
-          if [ ! -f "$V19_ZIP" ]; then
-            echo "ERROR: V-19 source ZIP was not found:"
-            echo "$V19_ZIP"
+          if [ ! -f "$V20_ZIP" ]; then
+            echo "ERROR: Exact V-20 ZIP not found."
             echo
-            echo "ZIP files currently in the repository:"
+            echo "ZIP files in repository:"
             find "$GITHUB_WORKSPACE" \
               -maxdepth 2 \
               -type f \
@@ -80,13 +73,13 @@ jobs:
             exit 1
           fi
 
-          echo "V-19 source ZIP FOUND:"
-          ls -lh "$V19_ZIP"
+          echo "V-20 ZIP FOUND:"
+          ls -lh "$V20_ZIP"
 
       # ============================================================
-      # 5. EXTRACT V-19 SOURCE
+      # 5. EXTRACT V-20
       # ============================================================
-      - name: Extract V-19 Android project
+      - name: Extract V-20 Android project
         shell: bash
         run: |
           set -euo pipefail
@@ -94,14 +87,12 @@ jobs:
           rm -rf "$GITHUB_WORKSPACE/source"
           mkdir -p "$GITHUB_WORKSPACE/source"
 
-          unzip -q "$V19_ZIP" -d "$GITHUB_WORKSPACE/source"
+          unzip -q "$V20_ZIP" -d "$GITHUB_WORKSPACE/source"
 
-          echo "V-19 ZIP extracted."
+          echo "V-20 source extracted."
 
       # ============================================================
-      # 6. LOCATE THE ANDROID PROJECT
-      # Require exactly one settings.gradle(.kts), so the wrong
-      # nested project cannot be selected silently.
+      # 6. LOCATE EXACTLY ONE ANDROID PROJECT
       # ============================================================
       - name: Locate Android project
         shell: bash
@@ -119,12 +110,6 @@ jobs:
             echo "ERROR: Expected exactly one settings.gradle(.kts)."
             echo "Found: ${#SETTINGS_FILES[@]}"
             printf '%s\n' "${SETTINGS_FILES[@]}"
-            echo
-            echo "Extracted Android project files:"
-            find "$GITHUB_WORKSPACE/source" \
-              -maxdepth 7 \
-              -type f \
-              -print | sort | head -400
             exit 1
           fi
 
@@ -137,34 +122,19 @@ jobs:
           echo "$PROJECT_DIR"
 
       # ============================================================
-      # 7. VERIFY PROJECT STRUCTURE
+      # 7. PROJECT STRUCTURE CHECK
       # ============================================================
-      - name: Verify V-19 Android project
+      - name: Verify V-20 Android project
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          if [ ! -f "settings.gradle" ] && [ ! -f "settings.gradle.kts" ]; then
-            echo "ERROR: settings.gradle(.kts) missing."
-            exit 1
-          fi
-
-          if [ ! -f "build.gradle" ] && [ ! -f "build.gradle.kts" ]; then
-            echo "ERROR: root build.gradle(.kts) missing."
-            exit 1
-          fi
-
-          if [ ! -f "app/build.gradle" ] && [ ! -f "app/build.gradle.kts" ]; then
-            echo "ERROR: app/build.gradle(.kts) missing."
-            exit 1
-          fi
-
-          if [ ! -f "app/src/main/AndroidManifest.xml" ]; then
-            echo "ERROR: AndroidManifest.xml missing."
-            exit 1
-          fi
+          test -f settings.gradle || test -f settings.gradle.kts
+          test -f build.gradle || test -f build.gradle.kts
+          test -f app/build.gradle || test -f app/build.gradle.kts
+          test -f app/src/main/AndroidManifest.xml
 
           MAIN_ACTIVITY="$(
             find app/src/main \
@@ -181,42 +151,37 @@ jobs:
 
           echo "MAIN_ACTIVITY=$PROJECT_DIR/$MAIN_ACTIVITY" >> "$GITHUB_ENV"
 
-          echo "V-19 Android project structure OK."
-          echo "MainActivity: $MAIN_ACTIVITY"
+          echo "PROJECT STRUCTURE CHECK PASSED."
 
       # ============================================================
-      # 8. VERIFY V-19 VERSION
+      # 8. VERSION + PACKAGE CHECK
       # ============================================================
-      - name: Verify V-19 version
+      - name: Verify V-20 version and package
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          if [ -f "app/build.gradle" ]; then
+          if [ -f app/build.gradle ]; then
             BUILD_FILE="app/build.gradle"
           else
             BUILD_FILE="app/build.gradle.kts"
           fi
 
-          echo "Checking:"
-          echo "$BUILD_FILE"
+          grep -Eq 'versionCode[[:space:]]+(=[[:space:]]*)?20([[:space:]]|$)' "$BUILD_FILE"
+          grep -Eq 'versionName[[:space:]]+(=[[:space:]]*)?["'\'']2\.9\.0["'\'']' "$BUILD_FILE"
+          grep -Eq 'applicationId[[:space:]]+["'\'']com\.myshop\.app["'\'']' "$BUILD_FILE"
 
-          if ! grep -Eq 'versionCode[[:space:]]+(=[[:space:]]*)?19([[:space:]]|$)' "$BUILD_FILE"; then
-            echo "ERROR: versionCode 19 not found."
+          if grep -q 'applicationIdSuffix' "$BUILD_FILE"; then
+            echo "ERROR: applicationIdSuffix must not be present."
             exit 1
           fi
 
-          if ! grep -Eq 'versionName[[:space:]]+(=[[:space:]]*)?["'\'']2\.8\.0["'\'']' "$BUILD_FILE"; then
-            echo "ERROR: versionName 2.8.0 not found."
-            exit 1
-          fi
-
-          echo "V-19 VERSION CHECK PASSED."
+          echo "V-20 VERSION/PACKAGE CHECK PASSED."
 
       # ============================================================
-      # 9. VERIFY MAINACTIVITY SEARCHBOX FIX
+      # 9. KNOWN SEARCHBOX FIX CHECK
       # ============================================================
       - name: Verify MainActivity searchBox fix
         shell: bash
@@ -225,49 +190,54 @@ jobs:
 
           test -s "$MAIN_ACTIVITY"
 
-          grep -q 'searchBox[[:space:]]*=[[:space:]]*findViewById(R.id.searchBox)' \
+          grep -q \
+            'searchBox[[:space:]]*=[[:space:]]*findViewById(R.id.searchBox)' \
             "$MAIN_ACTIVITY"
 
-          grep -q 'searchBox.setOnEditorActionListener' \
+          grep -q \
+            'searchBox.setOnEditorActionListener' \
             "$MAIN_ACTIVITY"
 
-          if grep -q 'findViewById(R.id.searchBox).setOnEditorActionListener' \
+          if grep -q \
+            'findViewById(R.id.searchBox).setOnEditorActionListener' \
             "$MAIN_ACTIVITY"; then
-            echo "ERROR: unsafe searchBox listener expression still exists."
+            echo "ERROR: unsafe searchBox listener still exists."
             exit 1
           fi
 
-          echo "SEARCHBOX / LINE-91 FIX PASSED."
+          echo "SEARCHBOX FIX CHECK PASSED."
 
       # ============================================================
-      # 10. RUN PROJECT VALIDATOR WHEN PRESENT
+      # 10. V-20 VALIDATOR
       # ============================================================
-      - name: Validate V-19 project files
+      - name: Run V-20 validator
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          if [ -f "tools/validate_v19.py" ]; then
-            python3 tools/validate_v19.py
-            echo "V-19 validator PASSED."
+          if [ -f tools/validate_v20.py ]; then
+            python3 tools/validate_v20.py
           else
-            echo "tools/validate_v19.py not present; validator skipped."
+            echo "ERROR: tools/validate_v20.py is missing."
+            exit 1
           fi
 
+          echo "V-20 VALIDATOR PASSED."
+
       # ============================================================
-      # 11. PREPARE GRADLE
-      # If the project contains gradlew, use the project's wrapper.
-      # Otherwise use the runner's Gradle 8.9.
+      # 11. GRADLE 8.9
       # ============================================================
       - name: Set up Gradle 8.9
-        if: ${{ hashFiles('source/**/gradlew') == '' }}
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
           cache-disabled: true
 
+      # ============================================================
+      # 12. PREPARE GRADLE
+      # ============================================================
       - name: Prepare Gradle
         shell: bash
         run: |
@@ -275,7 +245,7 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          if [ -f "./gradlew" ]; then
+          if [ -f ./gradlew ]; then
             chmod +x ./gradlew
             ./gradlew --version
             echo "GRADLE_COMMAND=./gradlew" >> "$GITHUB_ENV"
@@ -285,9 +255,9 @@ jobs:
           fi
 
       # ============================================================
-      # 12. CLEAN
+      # 13. CLEAN
       # ============================================================
-      - name: Clean V-19 build
+      - name: Clean V-20 project
         shell: bash
         run: |
           set -euo pipefail
@@ -303,9 +273,9 @@ jobs:
             --stacktrace
 
       # ============================================================
-      # 13. CHECK DUPLICATE CLASSES
+      # 14. DUPLICATE CLASS CHECK
       # ============================================================
-      - name: Check Gradle duplicate classes
+      - name: Check duplicate classes
         shell: bash
         run: |
           set -euo pipefail
@@ -321,9 +291,9 @@ jobs:
           echo "DUPLICATE CLASS CHECK PASSED."
 
       # ============================================================
-      # 14. BUILD DEBUG APK
+      # 15. BUILD DEBUG APK
       # ============================================================
-      - name: Build MY SHOP V-19 Debug APK
+      - name: Build MY SHOP V-20 Debug APK
         shell: bash
         run: |
           set -euo pipefail
@@ -331,7 +301,7 @@ jobs:
           cd "$PROJECT_DIR"
 
           echo "============================================"
-          echo "BUILDING MY SHOP V-19 APK"
+          echo "BUILDING MY SHOP V-20 APK"
           echo "============================================"
 
           "$GRADLE_COMMAND" \
@@ -344,9 +314,9 @@ jobs:
           echo "GRADLE BUILD PASSED."
 
       # ============================================================
-      # 15. VERIFY APK
+      # 16. VERIFY APK FILE + VERSION + PACKAGE
       # ============================================================
-      - name: Verify V-19 APK
+      - name: Verify V-20 APK
         shell: bash
         run: |
           set -euo pipefail
@@ -360,42 +330,46 @@ jobs:
           )"
 
           if [ -z "$APK_FILE" ]; then
-            echo "ERROR: V-19 APK was not generated."
-            find "$PROJECT_DIR" \
-              -type f \
-              -name "*.apk" \
-              -print || true
+            echo "ERROR: V-20 APK was not generated."
             exit 1
           fi
+
+          echo "APK:"
+          ls -lh "$APK_FILE"
+
+          BADGING="$(aapt2 dump badging "$APK_FILE")"
+
+          echo "$BADGING" | grep -q \
+            "package: name='com.myshop.app' versionCode='20' versionName='2.9.0'"
 
           mkdir -p "$GITHUB_WORKSPACE/release"
 
           cp "$APK_FILE" \
-            "$GITHUB_WORKSPACE/release/V-19-MY-SHOP-debug.apk"
+            "$GITHUB_WORKSPACE/release/V-20-MY-SHOP-debug.apk"
 
           sha256sum \
-            "$GITHUB_WORKSPACE/release/V-19-MY-SHOP-debug.apk" \
-            > "$GITHUB_WORKSPACE/release/V-19-MY-SHOP-debug.sha256"
+            "$GITHUB_WORKSPACE/release/V-20-MY-SHOP-debug.apk" \
+            > "$GITHUB_WORKSPACE/release/V-20-MY-SHOP-debug.sha256"
 
           unzip -t \
-            "$GITHUB_WORKSPACE/release/V-19-MY-SHOP-debug.apk" \
+            "$GITHUB_WORKSPACE/release/V-20-MY-SHOP-debug.apk" \
             >/dev/null
 
-          test -s "$GITHUB_WORKSPACE/release/V-19-MY-SHOP-debug.apk"
-          test -s "$GITHUB_WORKSPACE/release/V-19-MY-SHOP-debug.sha256"
+          test -s "$GITHUB_WORKSPACE/release/V-20-MY-SHOP-debug.apk"
+          test -s "$GITHUB_WORKSPACE/release/V-20-MY-SHOP-debug.sha256"
 
-          echo "V-19 APK VERIFIED SUCCESSFULLY."
-          ls -lh "$GITHUB_WORKSPACE/release/"
+          echo "V-20 APK VERSION/PACKAGE CHECK PASSED."
+          echo "V-20 APK VERIFIED SUCCESSFULLY."
 
       # ============================================================
-      # 16. UPLOAD APK
+      # 17. UPLOAD FINAL APK
       # ============================================================
-      - name: Upload MY SHOP V-19 APK
+      - name: Upload MY SHOP V-20 APK
         uses: actions/upload-artifact@v4
         with:
-          name: V-19-MY-SHOP-APK
+          name: V-20-MY-SHOP-APK
           path: |
-            release/V-19-MY-SHOP-debug.apk
-            release/V-19-MY-SHOP-debug.sha256
+            release/V-20-MY-SHOP-debug.apk
+            release/V-20-MY-SHOP-debug.sha256
           if-no-files-found: error
           retention-days: 30
