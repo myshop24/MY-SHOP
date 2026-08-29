@@ -337,7 +337,24 @@ jobs:
           echo "APK:"
           ls -lh "$APK_FILE"
 
-          BADGING="$(aapt2 dump badging "$APK_FILE")"
+          # aapt2 is installed by the Android Build Tools package but is
+          # not guaranteed to be on PATH. Resolve the exact installed binary.
+          BUILD_TOOLS_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/35.0.0"
+          AAPT2="$BUILD_TOOLS_DIR/aapt2"
+
+          if [ ! -x "$AAPT2" ]; then
+            echo "ERROR: aapt2 not found at:"
+            echo "$AAPT2"
+            echo
+            echo "Installed build-tools:"
+            ls -la "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" || true
+            exit 1
+          fi
+
+          echo "Using aapt2:"
+          "$AAPT2" version
+
+          BADGING="$("$AAPT2" dump badging "$APK_FILE")"
 
           echo "$BADGING" | grep -q \
             "package: name='com.myshop.app' versionCode='20' versionName='2.9.0'"
