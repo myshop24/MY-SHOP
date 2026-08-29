@@ -1,1 +1,327 @@
+name: MY SHOP V-19 APK Build
 
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: MY SHOP V-19 APK
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+          cache-disabled: true
+
+      # ==========================================
+      # FIND V-19 SOURCE ZIP
+      # ==========================================
+
+      - name: Find V-19 source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_ZIP=""
+
+          if [ -f "./V-19 MY SHOP.zip" ]; then
+            SOURCE_ZIP="./V-19 MY SHOP.zip"
+          elif [ -f "./V-19_MY_SHOP_FINAL_BUILD_FIXED(2).zip" ]; then
+            SOURCE_ZIP="./V-19_MY_SHOP_FINAL_BUILD_FIXED(2).zip"
+          elif [ -f "./V-19_MY_SHOP_FINAL_BUILD_FIXED.zip" ]; then
+            SOURCE_ZIP="./V-19_MY_SHOP_FINAL_BUILD_FIXED.zip"
+          else
+            echo "ERROR: V-19 source ZIP not found."
+
+            echo "ZIP files currently in repository:"
+            find . -maxdepth 3 -type f -iname "*.zip" -print | sort
+
+            exit 1
+          fi
+
+          echo "Using V-19 source:"
+          echo "$SOURCE_ZIP"
+
+          echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
+
+      # ==========================================
+      # EXTRACT V-19 PROJECT
+      # ==========================================
+
+      - name: Extract V-19 Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf build_source
+          mkdir -p build_source
+
+          unzip -q "$SOURCE_ZIP" -d build_source
+
+          echo "V-19 ZIP extracted successfully."
+
+      # ==========================================
+      # LOCATE ANDROID PROJECT
+      # ==========================================
+
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t SETTINGS_FILES < <(
+            find build_source \
+              -type f \
+              \( \
+                -name "settings.gradle" \
+                -o \
+                -name "settings.gradle.kts" \
+              \) \
+              -print | sort
+          )
+
+          if [ "${#SETTINGS_FILES[@]}" -eq 0 ]; then
+            echo "ERROR: No Android settings.gradle found."
+
+            echo "Extracted files:"
+            find build_source -maxdepth 7 -type f | sort | head -300
+
+            exit 1
+          fi
+
+          if [ "${#SETTINGS_FILES[@]}" -gt 1 ]; then
+            echo "ERROR: Multiple Android projects found:"
+            printf '%s\n' "${SETTINGS_FILES[@]}"
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "${SETTINGS_FILES[0]}")"
+
+          if [ ! -f "$PROJECT_DIR/build.gradle" ] &&
+             [ ! -f "$PROJECT_DIR/build.gradle.kts" ]; then
+
+            echo "ERROR: Root Gradle build file not found."
+            echo "PROJECT_DIR=$PROJECT_DIR"
+
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT_DIR/app/build.gradle" ] &&
+             [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
+
+            echo "ERROR: app Gradle file not found."
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml" ]; then
+            echo "ERROR: AndroidManifest.xml not found."
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "================================"
+          echo "V-19 Android project found:"
+          echo "$PROJECT_DIR"
+          echo "================================"
+
+      # ==========================================
+      # CHECK V-19 SOURCE
+      # ==========================================
+
+      - name: Verify V-19 source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "Checking V-19 source..."
+
+          test -f settings.gradle -o -f settings.gradle.kts
+          test -f build.gradle -o -f build.gradle.kts
+          test -f app/build.gradle -o -f app/build.gradle.kts
+          test -f app/src/main/AndroidManifest.xml
+
+          echo "V-19 source structure OK."
+
+      # ==========================================
+      # CHECK DUPLICATE JAVA SOURCE
+      # ==========================================
+
+      - name: Check duplicate Java source classes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "Checking duplicate Java source files..."
+
+          DUPLICATES=$(
+            find app/src/main/java \
+              -type f \
+              -name "*.java" \
+              -printf "%P\n" |
+            sort |
+            uniq -d || true
+          )
+
+          if [ -n "$DUPLICATES" ]; then
+            echo "ERROR: Duplicate Java source files found:"
+            echo "$DUPLICATES"
+            exit 1
+          fi
+
+          echo "No duplicate Java source files."
+
+      # ==========================================
+      # GRADLE CHECK
+      # ==========================================
+
+      - name: Verify Gradle project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          gradle \
+            --no-daemon \
+            tasks \
+            --stacktrace
+
+      # ==========================================
+      # REAL DUPLICATE CLASS CHECK
+      # ==========================================
+
+      - name: Check Gradle duplicate classes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          gradle \
+            --no-daemon \
+            :app:checkDebugDuplicateClasses \
+            --stacktrace
+
+      # ==========================================
+      # BUILD DEBUG
+      # ==========================================
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          gradle \
+            --no-daemon \
+            clean \
+            :app:assembleDebug \
+            --stacktrace
+
+      # ==========================================
+      # BUILD RELEASE
+      # ==========================================
+
+      - name: Build Release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          gradle \
+            --no-daemon \
+            :app:assembleRelease \
+            --stacktrace
+
+      # ==========================================
+      # VERIFY APK
+      # ==========================================
+
+      - name: Verify APK files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEBUG_APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
+          RELEASE_APK="$PROJECT_DIR/app/build/outputs/apk/release/app-release-unsigned.apk"
+
+          if [ ! -s "$DEBUG_APK" ]; then
+            echo "ERROR: Debug APK not found."
+            exit 1
+          fi
+
+          if [ ! -s "$RELEASE_APK" ]; then
+            echo "ERROR: Release APK not found."
+            exit 1
+          fi
+
+          unzip -t "$DEBUG_APK" >/dev/null
+          unzip -t "$RELEASE_APK" >/dev/null
+
+          mkdir -p artifacts
+
+          cp "$DEBUG_APK" \
+            "artifacts/V-19 MY SHOP-debug.apk"
+
+          cp "$RELEASE_APK" \
+            "artifacts/V-19 MY SHOP-release-unsigned.apk"
+
+          sha256sum artifacts/*.apk \
+            | tee artifacts/SHA256SUMS.txt
+
+          echo "================================"
+          echo "V-19 APK BUILD SUCCESSFUL"
+          echo "================================"
+
+          ls -lh artifacts/
+
+      # ==========================================
+      # UPLOAD APK
+      # ==========================================
+
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: V-19-MY-SHOP-APK
+          path: artifacts/
+          if-no-files-found: error
