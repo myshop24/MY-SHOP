@@ -1,0 +1,104 @@
+name: MY SHOP V-19 APK Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find and extract MY SHOP source
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE="V-19 MY SHOP.zip"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "ERROR: $ZIP_FILE not found"
+            exit 1
+          fi
+
+          rm -rf source
+          mkdir -p source
+
+          unzip -q "$ZIP_FILE" -d source
+
+          echo "Extracted files:"
+          find source -maxdepth 4 -type f | head -100
+
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -e
+
+          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/source" \
+            -name settings.gradle \
+            -o -name settings.gradle.kts \
+            | head -1 \
+            | xargs -r dirname)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android project not found"
+            find "$GITHUB_WORKSPACE/source" -maxdepth 5 -type f
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Android project found at: $PROJECT_DIR"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make Gradle executable
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+          else
+            echo "ERROR: gradlew not found"
+            exit 1
+          fi
+
+      - name: Build APK
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Find APK
+        shell: bash
+        run: |
+          find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
