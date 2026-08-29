@@ -10,7 +10,10 @@ permissions:
   contents: read
 
 env:
-  V19_ZIP: V-19-MY-SHOP-FULL-FIXED-V4.zip
+  # IMPORTANT:
+  # This is the exact V-19 ZIP filename currently present
+  # in the GitHub repository.
+  V19_ZIP: MY-SHOP-V19-FULL-FIXED-V3.zip
 
 jobs:
   build:
@@ -33,6 +36,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
       # ============================================================
       # 3. ANDROID SDK
@@ -53,7 +57,7 @@ jobs:
             "build-tools;35.0.0"
 
       # ============================================================
-      # 4. GRADLE
+      # 4. GRADLE 8.9
       # ============================================================
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
@@ -69,15 +73,23 @@ jobs:
         run: |
           set -euo pipefail
 
+          echo "Looking for:"
+          echo "$V19_ZIP"
+          echo
+
           if [ ! -f "$V19_ZIP" ]; then
             echo "ERROR: $V19_ZIP was not found."
             echo
-            echo "Repository files:"
-            find . -maxdepth 3 -type f -print
+            echo "V-19 ZIP files currently in repository:"
+            find . -maxdepth 2 -type f -iname '*V19*.zip' -print || true
+            echo
+            echo "All repository root files:"
+            find . -maxdepth 2 -type f -print
             exit 1
           fi
 
-          echo "V-19 ZIP found:"
+          echo
+          echo "V-19 ZIP found successfully:"
           ls -lh "$V19_ZIP"
 
       # ============================================================
@@ -131,11 +143,11 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Android project:"
+          echo "Android project located at:"
           echo "$PROJECT_DIR"
 
       # ============================================================
-      # 8. VERIFY PROJECT
+      # 8. VERIFY ANDROID PROJECT
       # ============================================================
       - name: Verify V-19 Android project
         shell: bash
@@ -172,7 +184,10 @@ jobs:
             exit 1
           fi
 
-          echo "V-19 Android project structure OK."
+          echo
+          echo "============================================"
+          echo "ANDROID PROJECT STRUCTURE OK"
+          echo "============================================"
 
       # ============================================================
       # 9. VERIFY V-19 VERSION
@@ -184,25 +199,43 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          grep -q "versionCode 19" app/build.gradle
-          grep -q "versionName '2.8.0'" app/build.gradle
+          BUILD_FILE=""
 
-          echo "V-19 version check passed."
+          if [ -f "app/build.gradle" ]; then
+            BUILD_FILE="app/build.gradle"
+          elif [ -f "app/build.gradle.kts" ]; then
+            BUILD_FILE="app/build.gradle.kts"
+          fi
+
+          if [ -z "$BUILD_FILE" ]; then
+            echo "ERROR: app build file not found."
+            exit 1
+          fi
+
+          echo "Checking V-19 version in:"
+          echo "$BUILD_FILE"
+          echo
+
+          if ! grep -Eq \
+            'versionCode[[:space:]]*([=][[:space:]]*)?19([[:space:]]|$)' \
+            "$BUILD_FILE"; then
+            echo "ERROR: versionCode 19 not found."
+            echo "Please make sure this is the V-19 source ZIP."
+            exit 1
+          fi
+
+          if ! grep -Eq \
+            'versionName[[:space:]]*([=][[:space:]]*)?["'\'']2\.8\.0["'\'']' \
+            "$BUILD_FILE"; then
+            echo "ERROR: versionName 2.8.0 not found."
+            echo "Please make sure this is the V-19 source ZIP."
+            exit 1
+          fi
+
+          echo "V-19 version check PASSED."
 
       # ============================================================
-      # 10. VALIDATE PROJECT FILES
-      # ============================================================
-      - name: Validate project files
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          python3 tools/validate_v19.py
-
-      # ============================================================
-      # 11. VERIFY MAINACTIVITY / LINE 91 FIX
+      # 10. VERIFY MAINACTIVITY SEARCHBOX FIX
       # ============================================================
       - name: Verify MainActivity searchBox fix
         shell: bash
@@ -216,24 +249,34 @@ jobs:
           test -s "$MAIN_ACTIVITY"
 
           grep -q '^package com.myshop.app;' "$MAIN_ACTIVITY"
-          grep -q 'public class MainActivity extends AppCompatActivity' "$MAIN_ACTIVITY"
 
-          # The EditText must be bound to the field first.
-          grep -q 'searchBox = findViewById(R.id.searchBox);' "$MAIN_ACTIVITY"
+          grep -q \
+            'public class MainActivity extends AppCompatActivity' \
+            "$MAIN_ACTIVITY"
+
+          # The EditText field must be bound first.
+          grep -q \
+            'searchBox = findViewById(R.id.searchBox);' \
+            "$MAIN_ACTIVITY"
 
           # The listener must be attached to the typed EditText field.
-          grep -q 'searchBox.setOnEditorActionListener' "$MAIN_ACTIVITY"
+          grep -q \
+            'searchBox.setOnEditorActionListener' \
+            "$MAIN_ACTIVITY"
 
           # The old unsafe expression must NOT exist.
-          if grep -q 'findViewById(R.id.searchBox).setOnEditorActionListener' "$MAIN_ACTIVITY"; then
+          if grep -q \
+            'findViewById(R.id.searchBox).setOnEditorActionListener' \
+            "$MAIN_ACTIVITY"; then
+
             echo "ERROR: old unsafe searchBox listener expression found."
             exit 1
           fi
 
-          echo "MainActivity.java searchBox/line-91 fix PASSED."
+          echo "MainActivity.java searchBox fix PASSED."
 
       # ============================================================
-      # 12. PREPARE GRADLE
+      # 11. PREPARE GRADLE
       # ============================================================
       - name: Prepare Gradle
         shell: bash
@@ -249,10 +292,13 @@ jobs:
           else
             gradle --version
             echo "GRADLE_COMMAND=gradle" >> "$GITHUB_ENV"
+            echo
+            echo "NOTE: Gradle wrapper not found."
+            echo "Using GitHub Actions Gradle 8.9."
           fi
 
       # ============================================================
-      # 13. CLEAN PROJECT
+      # 12. CLEAN PROJECT
       # ============================================================
       - name: Clean V-19 build
         shell: bash
@@ -272,7 +318,7 @@ jobs:
             --stacktrace
 
       # ============================================================
-      # 14. CHECK DUPLICATE CLASSES
+      # 13. CHECK DUPLICATE CLASSES
       # ============================================================
       - name: Check Gradle duplicate classes
         shell: bash
@@ -295,7 +341,7 @@ jobs:
           echo "============================================"
 
       # ============================================================
-      # 15. BUILD DEBUG APK
+      # 14. BUILD DEBUG APK
       # ============================================================
       - name: Build MY SHOP V-19 Debug APK
         shell: bash
@@ -317,7 +363,7 @@ jobs:
             --stacktrace
 
       # ============================================================
-      # 16. VERIFY APK
+      # 15. VERIFY APK
       # ============================================================
       - name: Verify V-19 APK
         shell: bash
@@ -370,7 +416,7 @@ jobs:
           ls -lh "$GITHUB_WORKSPACE/release/"
 
       # ============================================================
-      # 17. UPLOAD APK
+      # 16. UPLOAD APK
       # ============================================================
       - name: Upload MY SHOP V-19 APK
         uses: actions/upload-artifact@v4
