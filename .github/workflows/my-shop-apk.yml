@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  V19_ZIP: V-19-MY-SHOP-FULL-FIXED-V4.zip
+
 jobs:
   build:
     name: MY SHOP V-19 APK
@@ -66,10 +69,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          ZIP_FILE="V-19 MY SHOP.zip"
-
-          if [ ! -f "$ZIP_FILE" ]; then
-            echo "ERROR: $ZIP_FILE was not found."
+          if [ ! -f "$V19_ZIP" ]; then
+            echo "ERROR: $V19_ZIP was not found."
             echo
             echo "Repository files:"
             find . -maxdepth 3 -type f -print
@@ -77,7 +78,7 @@ jobs:
           fi
 
           echo "V-19 ZIP found:"
-          ls -lh "$ZIP_FILE"
+          ls -lh "$V19_ZIP"
 
       # ============================================================
       # 6. EXTRACT V-19
@@ -90,7 +91,7 @@ jobs:
           rm -rf "$GITHUB_WORKSPACE/source"
           mkdir -p "$GITHUB_WORKSPACE/source"
 
-          unzip -q "V-19 MY SHOP.zip" \
+          unzip -q "$V19_ZIP" \
             -d "$GITHUB_WORKSPACE/source"
 
           echo "V-19 source extracted."
@@ -149,6 +150,12 @@ jobs:
             exit 1
           fi
 
+          if [ ! -f "build.gradle" ] &&
+             [ ! -f "build.gradle.kts" ]; then
+            echo "ERROR: root build.gradle(.kts) missing."
+            exit 1
+          fi
+
           if [ ! -f "app/build.gradle" ] &&
              [ ! -f "app/build.gradle.kts" ]; then
             echo "ERROR: app/build.gradle(.kts) missing."
@@ -160,115 +167,73 @@ jobs:
             exit 1
           fi
 
+          if [ ! -f "app/src/main/java/com/myshop/app/MainActivity.java" ]; then
+            echo "ERROR: MainActivity.java missing."
+            exit 1
+          fi
+
           echo "V-19 Android project structure OK."
 
       # ============================================================
-      # 9. CREATE KOTLIN DUPLICATE-CLASS FIX
-      #
-      # IMPORTANT:
-      # The previous error was:
-      #
-      # kotlin.collections.jdk8.CollectionsJDK8Kt
-      # kotlin.internal.JDK7PlatformImplementations
-      # kotlin.internal.JDK8PlatformImplementations
-      #
-      # coming from different Kotlin stdlib versions.
-      #
-      # We remove the old jdk7/jdk8 split modules and force
-      # Kotlin stdlib to ONE compatible version.
+      # 9. VERIFY V-19 VERSION
       # ============================================================
-      - name: Create Kotlin dependency compatibility fix
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cat > "$GITHUB_WORKSPACE/kotlin-duplicate-fix.gradle" <<'EOF'
-          allprojects {
-
-              configurations.configureEach {
-
-                  // Remove old split Kotlin JDK modules.
-                  exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk7"
-                  exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk8"
-
-                  resolutionStrategy {
-
-                      // Keep all Kotlin stdlib components on one version.
-                      force "org.jetbrains.kotlin:kotlin-stdlib:1.8.22"
-                      force "org.jetbrains.kotlin:kotlin-stdlib-common:1.8.22"
-
-                      // Prevent accidental old versions.
-                      eachDependency { details ->
-                          if (details.requested.group ==
-                              "org.jetbrains.kotlin") {
-
-                              if (details.requested.name ==
-                                  "kotlin-stdlib-jdk7" ||
-                                  details.requested.name ==
-                                  "kotlin-stdlib-jdk8") {
-
-                                  details.useTarget(
-                                      "org.jetbrains.kotlin:kotlin-stdlib:1.8.22"
-                                  )
-
-                              } else if (
-                                  details.requested.name ==
-                                  "kotlin-stdlib" ||
-                                  details.requested.name ==
-                                  "kotlin-stdlib-common"
-                              ) {
-
-                                  details.useVersion("1.8.22")
-                              }
-                          }
-                      }
-                  }
-              }
-          }
-          EOF
-
-          echo "Kotlin compatibility fix created:"
-          cat "$GITHUB_WORKSPACE/kotlin-duplicate-fix.gradle"
-
-      # ============================================================
-      # 10. CREATE GRADLE PROPERTIES
-      # ============================================================
-      - name: Configure Gradle and AndroidX
+      - name: Verify V-19 version
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          touch gradle.properties
+          grep -q "versionCode 19" app/build.gradle
+          grep -q "versionName '2.8.0'" app/build.gradle
 
-          if grep -q "^android.useAndroidX=" gradle.properties; then
-            sed -i \
-              's/^android.useAndroidX=.*/android.useAndroidX=true/' \
-              gradle.properties
-          else
-            echo "android.useAndroidX=true" >> gradle.properties
-          fi
-
-          if grep -q "^android.enableJetifier=" gradle.properties; then
-            sed -i \
-              's/^android.enableJetifier=.*/android.enableJetifier=true/' \
-              gradle.properties
-          else
-            echo "android.enableJetifier=true" >> gradle.properties
-          fi
-
-          if ! grep -q "^org.gradle.jvmargs=" gradle.properties; then
-            echo \
-              "org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8" \
-              >> gradle.properties
-          fi
-
-          echo "gradle.properties:"
-          cat gradle.properties
+          echo "V-19 version check passed."
 
       # ============================================================
-      # 11. GRADLE WRAPPER
+      # 10. VALIDATE PROJECT FILES
+      # ============================================================
+      - name: Validate project files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          python3 tools/validate_v19.py
+
+      # ============================================================
+      # 11. VERIFY MAINACTIVITY / LINE 91 FIX
+      # ============================================================
+      - name: Verify MainActivity searchBox fix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          MAIN_ACTIVITY="app/src/main/java/com/myshop/app/MainActivity.java"
+
+          test -s "$MAIN_ACTIVITY"
+
+          grep -q '^package com.myshop.app;' "$MAIN_ACTIVITY"
+          grep -q 'public class MainActivity extends AppCompatActivity' "$MAIN_ACTIVITY"
+
+          # The EditText must be bound to the field first.
+          grep -q 'searchBox = findViewById(R.id.searchBox);' "$MAIN_ACTIVITY"
+
+          # The listener must be attached to the typed EditText field.
+          grep -q 'searchBox.setOnEditorActionListener' "$MAIN_ACTIVITY"
+
+          # The old unsafe expression must NOT exist.
+          if grep -q 'findViewById(R.id.searchBox).setOnEditorActionListener' "$MAIN_ACTIVITY"; then
+            echo "ERROR: old unsafe searchBox listener expression found."
+            exit 1
+          fi
+
+          echo "MainActivity.java searchBox/line-91 fix PASSED."
+
+      # ============================================================
+      # 12. PREPARE GRADLE
       # ============================================================
       - name: Prepare Gradle
         shell: bash
@@ -278,44 +243,16 @@ jobs:
           cd "$PROJECT_DIR"
 
           if [ -f "./gradlew" ]; then
-            echo "Gradle Wrapper found."
             chmod +x ./gradlew
             ./gradlew --version
             echo "GRADLE_COMMAND=./gradlew" >> "$GITHUB_ENV"
           else
-            echo "Gradle Wrapper not found."
             gradle --version
             echo "GRADLE_COMMAND=gradle" >> "$GITHUB_ENV"
           fi
 
       # ============================================================
-      # 12. SHOW KOTLIN DEPENDENCIES
-      #
-      # This lets us catch old Kotlin versions BEFORE APK build.
-      # ============================================================
-      - name: Check Kotlin dependency graph
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          "$GRADLE_COMMAND" \
-            :app:dependencies \
-            --configuration debugRuntimeClasspath \
-            --no-daemon \
-            --init-script "$GITHUB_WORKSPACE/kotlin-duplicate-fix.gradle" \
-            > "$GITHUB_WORKSPACE/kotlin-dependencies.txt" || true
-
-          echo "Kotlin dependency check completed."
-
-          grep -E \
-            "kotlin-stdlib|kotlin-stdlib-jdk7|kotlin-stdlib-jdk8" \
-            "$GITHUB_WORKSPACE/kotlin-dependencies.txt" \
-            | head -100 || true
-
-      # ============================================================
-      # 13. CLEAN EVERYTHING
+      # 13. CLEAN PROJECT
       # ============================================================
       - name: Clean V-19 build
         shell: bash
@@ -332,11 +269,10 @@ jobs:
             clean \
             --no-daemon \
             --no-build-cache \
-            --refresh-dependencies \
-            --init-script "$GITHUB_WORKSPACE/kotlin-duplicate-fix.gradle"
+            --stacktrace
 
       # ============================================================
-      # 14. CHECK DUPLICATE CLASSES BEFORE APK
+      # 14. CHECK DUPLICATE CLASSES
       # ============================================================
       - name: Check Gradle duplicate classes
         shell: bash
@@ -351,9 +287,7 @@ jobs:
             :app:checkDebugDuplicateClasses \
             --no-daemon \
             --no-build-cache \
-            --refresh-dependencies \
-            --stacktrace \
-            --init-script "$GITHUB_WORKSPACE/kotlin-duplicate-fix.gradle"
+            --stacktrace
 
           echo
           echo "============================================"
@@ -380,9 +314,7 @@ jobs:
             --no-daemon \
             --no-build-cache \
             --rerun-tasks \
-            --refresh-dependencies \
-            --stacktrace \
-            --init-script "$GITHUB_WORKSPACE/kotlin-duplicate-fix.gradle"
+            --stacktrace
 
       # ============================================================
       # 16. VERIFY APK
@@ -425,6 +357,10 @@ jobs:
           sha256sum \
             "$GITHUB_WORKSPACE/release/V-19-MY-SHOP-debug.apk" \
             > "$GITHUB_WORKSPACE/release/V-19-MY-SHOP-debug.sha256"
+
+          unzip -t \
+            "$GITHUB_WORKSPACE/release/V-19-MY-SHOP-debug.apk" \
+            >/dev/null
 
           echo
           echo "============================================"
