@@ -14,10 +14,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract V-19 source
+      - name: Check V-19 ZIP
         shell: bash
         run: |
           set -e
@@ -25,14 +26,23 @@ jobs:
           ZIP_FILE="V-19 MY SHOP.zip"
 
           if [ ! -f "$ZIP_FILE" ]; then
-            echo "ERROR: $ZIP_FILE not found"
+            echo "ERROR: V-19 MY SHOP.zip not found."
+            echo "Repository files:"
+            ls -la
             exit 1
           fi
+
+          echo "Found: $ZIP_FILE"
+
+      - name: Extract V-19 source
+        shell: bash
+        run: |
+          set -e
 
           rm -rf source
           mkdir -p source
 
-          unzip -q "$ZIP_FILE" -d source
+          unzip -q "V-19 MY SHOP.zip" -d source
 
           echo "Source extracted successfully."
 
@@ -47,9 +57,9 @@ jobs:
             -print -quit)
 
           if [ -z "$PROJECT_FILE" ]; then
-            echo "ERROR: Android project settings file not found."
-            echo "Files found:"
-            find "$GITHUB_WORKSPACE/source" -maxdepth 6 -type f
+            echo "ERROR: Android settings file not found."
+            echo "Searching extracted files..."
+            find "$GITHUB_WORKSPACE/source" -maxdepth 8 -type f | head -300
             exit 1
           fi
 
@@ -74,7 +84,7 @@ jobs:
         run: |
           set -e
 
-          yes | sdkmanager --licenses >/dev/null || true
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
           sdkmanager \
             "platform-tools" \
@@ -86,27 +96,66 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Verify Gradle
-        shell: bash
-        run: |
-          gradle --version
-
-      - name: Build APK
+      - name: Prepare Gradle
         shell: bash
         run: |
           set -e
 
           cd "$PROJECT_DIR"
 
-          echo "Building Android APK..."
-          gradle --no-daemon assembleDebug --stacktrace
+          if [ -f "./gradlew" ]; then
+            echo "Gradle Wrapper found."
+            chmod +x ./gradlew
+            ./gradlew --version
+            echo "USE_WRAPPER=true" >> "$GITHUB_ENV"
+          else
+            echo "Gradle Wrapper not found."
+            echo "Using installed Gradle 8.9."
+            gradle --version
+            echo "USE_WRAPPER=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "================================"
+          echo "Building MY SHOP V-19 APK"
+          echo "================================"
+
+          if [ "$USE_WRAPPER" = "true" ]; then
+            ./gradlew \
+              --no-daemon \
+              --stacktrace \
+              assembleDebug
+          else
+            gradle \
+              --no-daemon \
+              --stacktrace \
+              assembleDebug
+          fi
 
       - name: Find APK
         shell: bash
         run: |
           set -e
 
-          echo "Searching for APK files..."
+          echo "Searching for APK..."
+
+          APK_COUNT=$(find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
+            | wc -l)
+
+          echo "APK count: $APK_COUNT"
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "ERROR: No APK was generated."
+            exit 1
+          fi
 
           find "$PROJECT_DIR" \
             -type f \
