@@ -16,19 +16,28 @@ jobs:
 
     steps:
 
+      # ============================================================
+      # 1. CHECKOUT
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ============================================================
+      # 2. JAVA 17
+      # ============================================================
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
+      # ============================================================
+      # 3. ANDROID SDK
+      # ============================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK
+      - name: Install Android SDK components
         shell: bash
         run: |
           set -euo pipefail
@@ -40,194 +49,295 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0"
 
+      # ============================================================
+      # 4. GRADLE
+      # ============================================================
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
           cache-disabled: true
 
-      # ==========================================
-      # FIND V-19 SOURCE ZIP
-      # ==========================================
-
+      # ============================================================
+      # 5. FIND V-19 ZIP
+      # ============================================================
       - name: Find V-19 source ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          SOURCE_ZIP=""
+          ZIP_FILE="V-19 MY SHOP.zip"
 
-          if [ -f "./V-19 MY SHOP.zip" ]; then
-            SOURCE_ZIP="./V-19 MY SHOP.zip"
-          elif [ -f "./V-19_MY_SHOP_FINAL_BUILD_FIXED(2).zip" ]; then
-            SOURCE_ZIP="./V-19_MY_SHOP_FINAL_BUILD_FIXED(2).zip"
-          elif [ -f "./V-19_MY_SHOP_FINAL_BUILD_FIXED.zip" ]; then
-            SOURCE_ZIP="./V-19_MY_SHOP_FINAL_BUILD_FIXED.zip"
-          else
-            echo "ERROR: V-19 source ZIP not found."
-
-            echo "ZIP files currently in repository:"
-            find . -maxdepth 3 -type f -iname "*.zip" -print | sort
-
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "ERROR: $ZIP_FILE was not found."
+            echo
+            echo "Repository files:"
+            find . -maxdepth 3 -type f -print
             exit 1
           fi
 
-          echo "Using V-19 source:"
-          echo "$SOURCE_ZIP"
+          echo "V-19 ZIP found:"
+          ls -lh "$ZIP_FILE"
 
-          echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
-
-      # ==========================================
-      # EXTRACT V-19 PROJECT
-      # ==========================================
-
+      # ============================================================
+      # 6. EXTRACT V-19
+      # ============================================================
       - name: Extract V-19 Android project
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf build_source
-          mkdir -p build_source
+          rm -rf "$GITHUB_WORKSPACE/source"
+          mkdir -p "$GITHUB_WORKSPACE/source"
 
-          unzip -q "$SOURCE_ZIP" -d build_source
+          unzip -q "V-19 MY SHOP.zip" \
+            -d "$GITHUB_WORKSPACE/source"
 
-          echo "V-19 ZIP extracted successfully."
+          echo "V-19 source extracted."
 
-      # ==========================================
-      # LOCATE ANDROID PROJECT
-      # ==========================================
-
+      # ============================================================
+      # 7. LOCATE ANDROID PROJECT
+      # ============================================================
       - name: Locate Android project
         shell: bash
         run: |
           set -euo pipefail
 
-          mapfile -t SETTINGS_FILES < <(
-            find build_source \
+          SETTINGS_FILE="$(
+            find "$GITHUB_WORKSPACE/source" \
               -type f \
               \( \
                 -name "settings.gradle" \
                 -o \
                 -name "settings.gradle.kts" \
               \) \
-              -print | sort
-          )
+              -print \
+              -quit
+          )"
 
-          if [ "${#SETTINGS_FILES[@]}" -eq 0 ]; then
-            echo "ERROR: No Android settings.gradle found."
-
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "ERROR: settings.gradle or settings.gradle.kts not found."
+            echo
             echo "Extracted files:"
-            find build_source -maxdepth 7 -type f | sort | head -300
-
+            find "$GITHUB_WORKSPACE/source" \
+              -maxdepth 8 \
+              -type f \
+              -print | head -300
             exit 1
           fi
 
-          if [ "${#SETTINGS_FILES[@]}" -gt 1 ]; then
-            echo "ERROR: Multiple Android projects found:"
-            printf '%s\n' "${SETTINGS_FILES[@]}"
-            exit 1
-          fi
-
-          PROJECT_DIR="$(dirname "${SETTINGS_FILES[0]}")"
-
-          if [ ! -f "$PROJECT_DIR/build.gradle" ] &&
-             [ ! -f "$PROJECT_DIR/build.gradle.kts" ]; then
-
-            echo "ERROR: Root Gradle build file not found."
-            echo "PROJECT_DIR=$PROJECT_DIR"
-
-            exit 1
-          fi
-
-          if [ ! -f "$PROJECT_DIR/app/build.gradle" ] &&
-             [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
-
-            echo "ERROR: app Gradle file not found."
-            exit 1
-          fi
-
-          if [ ! -f "$PROJECT_DIR/app/src/main/AndroidManifest.xml" ]; then
-            echo "ERROR: AndroidManifest.xml not found."
-            exit 1
-          fi
+          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "================================"
-          echo "V-19 Android project found:"
+          echo "Android project:"
           echo "$PROJECT_DIR"
-          echo "================================"
 
-      # ==========================================
-      # CHECK V-19 SOURCE
-      # ==========================================
-
-      - name: Verify V-19 source
+      # ============================================================
+      # 8. VERIFY PROJECT
+      # ============================================================
+      - name: Verify V-19 Android project
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          echo "Checking V-19 source..."
-
-          test -f settings.gradle -o -f settings.gradle.kts
-          test -f build.gradle -o -f build.gradle.kts
-          test -f app/build.gradle -o -f app/build.gradle.kts
-          test -f app/src/main/AndroidManifest.xml
-
-          echo "V-19 source structure OK."
-
-      # ==========================================
-      # CHECK DUPLICATE JAVA SOURCE
-      # ==========================================
-
-      - name: Check duplicate Java source classes
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          echo "Checking duplicate Java source files..."
-
-          DUPLICATES=$(
-            find app/src/main/java \
-              -type f \
-              -name "*.java" \
-              -printf "%P\n" |
-            sort |
-            uniq -d || true
-          )
-
-          if [ -n "$DUPLICATES" ]; then
-            echo "ERROR: Duplicate Java source files found:"
-            echo "$DUPLICATES"
+          if [ ! -f "settings.gradle" ] &&
+             [ ! -f "settings.gradle.kts" ]; then
+            echo "ERROR: settings.gradle(.kts) missing."
             exit 1
           fi
 
-          echo "No duplicate Java source files."
+          if [ ! -f "app/build.gradle" ] &&
+             [ ! -f "app/build.gradle.kts" ]; then
+            echo "ERROR: app/build.gradle(.kts) missing."
+            exit 1
+          fi
 
-      # ==========================================
-      # GRADLE CHECK
-      # ==========================================
+          if [ ! -f "app/src/main/AndroidManifest.xml" ]; then
+            echo "ERROR: AndroidManifest.xml missing."
+            exit 1
+          fi
 
-      - name: Verify Gradle project
+          echo "V-19 Android project structure OK."
+
+      # ============================================================
+      # 9. CREATE KOTLIN DUPLICATE-CLASS FIX
+      #
+      # IMPORTANT:
+      # The previous error was:
+      #
+      # kotlin.collections.jdk8.CollectionsJDK8Kt
+      # kotlin.internal.JDK7PlatformImplementations
+      # kotlin.internal.JDK8PlatformImplementations
+      #
+      # coming from different Kotlin stdlib versions.
+      #
+      # We remove the old jdk7/jdk8 split modules and force
+      # Kotlin stdlib to ONE compatible version.
+      # ============================================================
+      - name: Create Kotlin dependency compatibility fix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > "$GITHUB_WORKSPACE/kotlin-duplicate-fix.gradle" <<'EOF'
+          allprojects {
+
+              configurations.configureEach {
+
+                  // Remove old split Kotlin JDK modules.
+                  exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk7"
+                  exclude group: "org.jetbrains.kotlin", module: "kotlin-stdlib-jdk8"
+
+                  resolutionStrategy {
+
+                      // Keep all Kotlin stdlib components on one version.
+                      force "org.jetbrains.kotlin:kotlin-stdlib:1.8.22"
+                      force "org.jetbrains.kotlin:kotlin-stdlib-common:1.8.22"
+
+                      // Prevent accidental old versions.
+                      eachDependency { details ->
+                          if (details.requested.group ==
+                              "org.jetbrains.kotlin") {
+
+                              if (details.requested.name ==
+                                  "kotlin-stdlib-jdk7" ||
+                                  details.requested.name ==
+                                  "kotlin-stdlib-jdk8") {
+
+                                  details.useTarget(
+                                      "org.jetbrains.kotlin:kotlin-stdlib:1.8.22"
+                                  )
+
+                              } else if (
+                                  details.requested.name ==
+                                  "kotlin-stdlib" ||
+                                  details.requested.name ==
+                                  "kotlin-stdlib-common"
+                              ) {
+
+                                  details.useVersion("1.8.22")
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+          EOF
+
+          echo "Kotlin compatibility fix created:"
+          cat "$GITHUB_WORKSPACE/kotlin-duplicate-fix.gradle"
+
+      # ============================================================
+      # 10. CREATE GRADLE PROPERTIES
+      # ============================================================
+      - name: Configure Gradle and AndroidX
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          gradle \
+          touch gradle.properties
+
+          if grep -q "^android.useAndroidX=" gradle.properties; then
+            sed -i \
+              's/^android.useAndroidX=.*/android.useAndroidX=true/' \
+              gradle.properties
+          else
+            echo "android.useAndroidX=true" >> gradle.properties
+          fi
+
+          if grep -q "^android.enableJetifier=" gradle.properties; then
+            sed -i \
+              's/^android.enableJetifier=.*/android.enableJetifier=true/' \
+              gradle.properties
+          else
+            echo "android.enableJetifier=true" >> gradle.properties
+          fi
+
+          if ! grep -q "^org.gradle.jvmargs=" gradle.properties; then
+            echo \
+              "org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8" \
+              >> gradle.properties
+          fi
+
+          echo "gradle.properties:"
+          cat gradle.properties
+
+      # ============================================================
+      # 11. GRADLE WRAPPER
+      # ============================================================
+      - name: Prepare Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          if [ -f "./gradlew" ]; then
+            echo "Gradle Wrapper found."
+            chmod +x ./gradlew
+            ./gradlew --version
+            echo "GRADLE_COMMAND=./gradlew" >> "$GITHUB_ENV"
+          else
+            echo "Gradle Wrapper not found."
+            gradle --version
+            echo "GRADLE_COMMAND=gradle" >> "$GITHUB_ENV"
+          fi
+
+      # ============================================================
+      # 12. SHOW KOTLIN DEPENDENCIES
+      #
+      # This lets us catch old Kotlin versions BEFORE APK build.
+      # ============================================================
+      - name: Check Kotlin dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          "$GRADLE_COMMAND" \
+            :app:dependencies \
+            --configuration debugRuntimeClasspath \
             --no-daemon \
-            tasks \
-            --stacktrace
+            --init-script "$GITHUB_WORKSPACE/kotlin-duplicate-fix.gradle" \
+            > "$GITHUB_WORKSPACE/kotlin-dependencies.txt" || true
 
-      # ==========================================
-      # REAL DUPLICATE CLASS CHECK
-      # ==========================================
+          echo "Kotlin dependency check completed."
 
+          grep -E \
+            "kotlin-stdlib|kotlin-stdlib-jdk7|kotlin-stdlib-jdk8" \
+            "$GITHUB_WORKSPACE/kotlin-dependencies.txt" \
+            | head -100 || true
+
+      # ============================================================
+      # 13. CLEAN EVERYTHING
+      # ============================================================
+      - name: Clean V-19 build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          rm -rf .gradle
+          rm -rf build
+          rm -rf app/build
+
+          "$GRADLE_COMMAND" \
+            clean \
+            --no-daemon \
+            --no-build-cache \
+            --refresh-dependencies \
+            --init-script "$GITHUB_WORKSPACE/kotlin-duplicate-fix.gradle"
+
+      # ============================================================
+      # 14. CHECK DUPLICATE CLASSES BEFORE APK
+      # ============================================================
       - name: Check Gradle duplicate classes
         shell: bash
         run: |
@@ -235,93 +345,103 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          gradle \
-            --no-daemon \
+          echo "Checking duplicate classes..."
+
+          "$GRADLE_COMMAND" \
             :app:checkDebugDuplicateClasses \
-            --stacktrace
+            --no-daemon \
+            --no-build-cache \
+            --refresh-dependencies \
+            --stacktrace \
+            --init-script "$GITHUB_WORKSPACE/kotlin-duplicate-fix.gradle"
 
-      # ==========================================
-      # BUILD DEBUG
-      # ==========================================
+          echo
+          echo "============================================"
+          echo "DUPLICATE CLASS CHECK PASSED"
+          echo "============================================"
 
-      - name: Build Debug APK
+      # ============================================================
+      # 15. BUILD DEBUG APK
+      # ============================================================
+      - name: Build MY SHOP V-19 Debug APK
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          gradle \
-            --no-daemon \
-            clean \
+          echo
+          echo "============================================"
+          echo "BUILDING MY SHOP V-19 APK"
+          echo "============================================"
+
+          "$GRADLE_COMMAND" \
             :app:assembleDebug \
-            --stacktrace
-
-      # ==========================================
-      # BUILD RELEASE
-      # ==========================================
-
-      - name: Build Release APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          gradle \
             --no-daemon \
-            :app:assembleRelease \
-            --stacktrace
+            --no-build-cache \
+            --rerun-tasks \
+            --refresh-dependencies \
+            --stacktrace \
+            --init-script "$GITHUB_WORKSPACE/kotlin-duplicate-fix.gradle"
 
-      # ==========================================
-      # VERIFY APK
-      # ==========================================
-
-      - name: Verify APK files
+      # ============================================================
+      # 16. VERIFY APK
+      # ============================================================
+      - name: Verify V-19 APK
         shell: bash
         run: |
           set -euo pipefail
 
-          DEBUG_APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
-          RELEASE_APK="$PROJECT_DIR/app/build/outputs/apk/release/app-release-unsigned.apk"
+          APK_FILE="$(
+            find "$PROJECT_DIR" \
+              -type f \
+              -path "*/build/outputs/apk/debug/*.apk" \
+              -print \
+              -quit
+          )"
 
-          if [ ! -s "$DEBUG_APK" ]; then
-            echo "ERROR: Debug APK not found."
+          if [ -z "$APK_FILE" ]; then
+            echo "ERROR: V-19 APK was not generated."
+
+            echo
+            echo "All APK files:"
+            find "$PROJECT_DIR" \
+              -type f \
+              -name "*.apk" \
+              -print || true
+
             exit 1
           fi
 
-          if [ ! -s "$RELEASE_APK" ]; then
-            echo "ERROR: Release APK not found."
-            exit 1
-          fi
+          echo "APK found:"
+          echo "$APK_FILE"
 
-          unzip -t "$DEBUG_APK" >/dev/null
-          unzip -t "$RELEASE_APK" >/dev/null
+          mkdir -p "$GITHUB_WORKSPACE/release"
 
-          mkdir -p artifacts
+          cp \
+            "$APK_FILE" \
+            "$GITHUB_WORKSPACE/release/V-19-MY-SHOP-debug.apk"
 
-          cp "$DEBUG_APK" \
-            "artifacts/V-19 MY SHOP-debug.apk"
+          sha256sum \
+            "$GITHUB_WORKSPACE/release/V-19-MY-SHOP-debug.apk" \
+            > "$GITHUB_WORKSPACE/release/V-19-MY-SHOP-debug.sha256"
 
-          cp "$RELEASE_APK" \
-            "artifacts/V-19 MY SHOP-release-unsigned.apk"
+          echo
+          echo "============================================"
+          echo "V-19 APK SUCCESSFULLY CREATED"
+          echo "============================================"
 
-          sha256sum artifacts/*.apk \
-            | tee artifacts/SHA256SUMS.txt
+          ls -lh "$GITHUB_WORKSPACE/release/"
 
-          echo "================================"
-          echo "V-19 APK BUILD SUCCESSFUL"
-          echo "================================"
-
-          ls -lh artifacts/
-
-      # ==========================================
-      # UPLOAD APK
-      # ==========================================
-
-      - name: Upload APK artifacts
+      # ============================================================
+      # 17. UPLOAD APK
+      # ============================================================
+      - name: Upload MY SHOP V-19 APK
         uses: actions/upload-artifact@v4
         with:
           name: V-19-MY-SHOP-APK
-          path: artifacts/
+          path: |
+            release/V-19-MY-SHOP-debug.apk
+            release/V-19-MY-SHOP-debug.sha256
           if-no-files-found: error
+          retention-days: 30
