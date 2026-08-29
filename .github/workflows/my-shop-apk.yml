@@ -17,7 +17,7 @@ jobs:
   build:
     name: MY SHOP AUTO VERSION APK
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
 
@@ -62,50 +62,62 @@ jobs:
         run: |
           set -euo pipefail
 
-          # GitHub run number increases automatically on every workflow run.
           VERSION_CODE="$GITHUB_RUN_NUMBER"
-
           VERSION_NAME="${BASE_VERSION_NAME}.${GITHUB_RUN_NUMBER}"
 
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
 
           echo "============================================"
-          echo "AUTOMATIC VERSION"
+          echo "MY SHOP AUTOMATIC VERSION"
           echo "============================================"
           echo "Version Code : $VERSION_CODE"
           echo "Version Name : $VERSION_NAME"
+          echo "Run Number   : $GITHUB_RUN_NUMBER"
           echo "============================================"
 
       # ============================================================
-      # 5. FIND LATEST SOURCE ZIP AUTOMATICALLY
+      # 5. FIND LATEST MY SHOP SOURCE ZIP
       # ============================================================
       - name: Find latest MY SHOP source ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Searching for MY SHOP V-XX source ZIP files..."
+          echo "Searching for MY SHOP V-XX source ZIP..."
 
           mapfile -t ZIP_FILES < <(
             find "$GITHUB_WORKSPACE" \
-              -maxdepth 2 \
               -type f \
-              -iname "*.zip" \
-              -printf '%f\n' |
-            grep -Ei '^V-[0-9]+.*\.zip$|^V_[0-9]+.*\.zip$|^V[0-9]+.*\.zip$' |
+              \
+                -iname "V-*.zip" \
+                -o \
+                -iname "V_*.zip" \
+                -o \
+                -iname "V*.zip" \
+              \
+              ! -path "$GITHUB_WORKSPACE/.git/*" \
+              -printf '%p\n' |
             sort -V
           )
 
           if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
-            echo "ERROR: No MY SHOP V-XX ZIP file found."
+            echo "ERROR: No MY SHOP source ZIP found."
+            echo
+            echo "ZIP files found:"
+            find "$GITHUB_WORKSPACE" \
+              -type f \
+              -iname "*.zip" \
+              ! -path "$GITHUB_WORKSPACE/.git/*" \
+              -print | sort
+
             exit 1
           fi
 
-          SOURCE_ZIP="${ZIP_FILES[-1]}"
+          SOURCE_ZIP="${ZIP_FILES[${#ZIP_FILES[@]}-1]}"
 
-          if [ ! -f "$GITHUB_WORKSPACE/$SOURCE_ZIP" ]; then
-            echo "ERROR: Selected ZIP does not exist:"
+          if [ ! -f "$SOURCE_ZIP" ]; then
+            echo "ERROR: Selected source ZIP does not exist."
             echo "$SOURCE_ZIP"
             exit 1
           fi
@@ -113,7 +125,7 @@ jobs:
           echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
 
           echo
-          echo "All detected ZIP files:"
+          echo "Detected source ZIP files:"
           printf '%s\n' "${ZIP_FILES[@]}"
 
           echo
@@ -121,7 +133,7 @@ jobs:
           echo "SELECTED SOURCE ZIP"
           echo "============================================"
           echo "$SOURCE_ZIP"
-          ls -lh "$GITHUB_WORKSPACE/$SOURCE_ZIP"
+          ls -lh "$SOURCE_ZIP"
 
       # ============================================================
       # 6. EXTRACT SOURCE
@@ -132,13 +144,22 @@ jobs:
           set -euo pipefail
 
           rm -rf "$GITHUB_WORKSPACE/source"
+
           mkdir -p "$GITHUB_WORKSPACE/source"
 
           unzip -q \
-            "$GITHUB_WORKSPACE/$SOURCE_ZIP" \
+            "$SOURCE_ZIP" \
             -d "$GITHUB_WORKSPACE/source"
 
           echo "Source extracted successfully."
+
+          echo
+          echo "Top-level extracted files:"
+          find "$GITHUB_WORKSPACE/source" \
+            -maxdepth 3 \
+            -type f \
+            | sort \
+            | head -200
 
       # ============================================================
       # 7. LOCATE EXACTLY ONE ANDROID PROJECT
@@ -156,13 +177,17 @@ jobs:
                 -o \
                 -name "settings.gradle.kts" \
               \
-              -print | sort
+              -print \
+              | sort
           )
 
+          echo "Android settings files found:"
+          printf '%s\n' "${SETTINGS_FILES[@]}"
+
           if [ "${#SETTINGS_FILES[@]}" -ne 1 ]; then
+            echo
             echo "ERROR: Expected exactly ONE settings.gradle(.kts)."
             echo "Found: ${#SETTINGS_FILES[@]}"
-            printf '%s\n' "${SETTINGS_FILES[@]}"
             exit 1
           fi
 
@@ -172,11 +197,13 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
           echo
-          echo "Android project:"
+          echo "============================================"
+          echo "ANDROID PROJECT"
+          echo "============================================"
           echo "$PROJECT_DIR"
 
       # ============================================================
-      # 8. PROJECT STRUCTURE
+      # 8. VERIFY ANDROID PROJECT
       # ============================================================
       - name: Verify Android project
         shell: bash
@@ -185,6 +212,9 @@ jobs:
 
           cd "$PROJECT_DIR"
 
+          # --------------------------------------------------------
+          # Settings
+          # --------------------------------------------------------
           if [ -f settings.gradle ]; then
             echo "settings.gradle found."
           elif [ -f settings.gradle.kts ]; then
@@ -194,6 +224,9 @@ jobs:
             exit 1
           fi
 
+          # --------------------------------------------------------
+          # Root Gradle
+          # --------------------------------------------------------
           if [ -f build.gradle ]; then
             echo "build.gradle found."
           elif [ -f build.gradle.kts ]; then
@@ -203,6 +236,9 @@ jobs:
             exit 1
           fi
 
+          # --------------------------------------------------------
+          # App Gradle
+          # --------------------------------------------------------
           if [ -f app/build.gradle ]; then
             BUILD_FILE="app/build.gradle"
           elif [ -f app/build.gradle.kts ]; then
@@ -212,4 +248,53 @@ jobs:
             exit 1
           fi
 
-          echo "BUILD_FILE=$PROJECT_DIR/$BUILD_FILE
+          echo "BUILD_FILE=$PROJECT_DIR/$BUILD_FILE" >> "$GITHUB_ENV"
+
+          # --------------------------------------------------------
+          # Android Manifest
+          # --------------------------------------------------------
+          if [ ! -f app/src/main/AndroidManifest.xml ]; then
+            echo "ERROR: AndroidManifest.xml missing."
+            exit 1
+          fi
+
+          # --------------------------------------------------------
+          # MainActivity
+          # --------------------------------------------------------
+          MAIN_ACTIVITY="$(
+            find app/src/main \
+              -type f \
+              -name "MainActivity.java" \
+              -print \
+              -quit
+          )"
+
+          if [ -z "$MAIN_ACTIVITY" ]; then
+            echo "ERROR: MainActivity.java not found."
+            exit 1
+          fi
+
+          echo "MAIN_ACTIVITY=$PROJECT_DIR/$MAIN_ACTIVITY" >> "$GITHUB_ENV"
+
+          echo
+          echo "============================================"
+          echo "ANDROID PROJECT CHECK PASSED"
+          echo "============================================"
+          echo "Project : $PROJECT_DIR"
+          echo "Gradle  : $BUILD_FILE"
+          echo "Activity: $MAIN_ACTIVITY"
+
+      # ============================================================
+      # 9. AUTOMATICALLY SET VERSION
+      # ============================================================
+      - name: Apply automatic version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - "$BUILD_FILE" "$VERSION_CODE" "$VERSION_NAME" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          build_file =
