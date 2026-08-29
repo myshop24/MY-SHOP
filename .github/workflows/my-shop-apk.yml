@@ -89,13 +89,13 @@ jobs:
           mapfile -t ZIP_FILES < <(
             find "$GITHUB_WORKSPACE" \
               -type f \
-              \
+              \( \
                 -iname "V-*.zip" \
                 -o \
                 -iname "V_*.zip" \
                 -o \
                 -iname "V*.zip" \
-              \
+              \) \
               ! -path "$GITHUB_WORKSPACE/.git/*" \
               -printf '%p\n' |
             sort -V
@@ -151,14 +151,6 @@ jobs:
 
           echo "Source extracted successfully."
 
-          echo
-          echo "Top-level extracted files:"
-          find "$GITHUB_WORKSPACE/source" \
-            -maxdepth 3 \
-            -type f \
-            | sort \
-            | head -200
-
       # ============================================================
       # 7. LOCATE EXACTLY ONE ANDROID PROJECT
       # ============================================================
@@ -170,13 +162,13 @@ jobs:
           mapfile -t SETTINGS_FILES < <(
             find "$GITHUB_WORKSPACE/source" \
               -type f \
-              \
+              \( \
                 -name "settings.gradle" \
                 -o \
                 -name "settings.gradle.kts" \
-              \
-              -print \
-              | sort
+              \) \
+              -print |
+            sort
           )
 
           echo "Android settings files found:"
@@ -210,9 +202,6 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          # --------------------------------------------------------
-          # Root Gradle
-          # --------------------------------------------------------
           if [ -f build.gradle ]; then
             echo "Root build.gradle found."
           elif [ -f build.gradle.kts ]; then
@@ -222,9 +211,6 @@ jobs:
             exit 1
           fi
 
-          # --------------------------------------------------------
-          # App Gradle
-          # --------------------------------------------------------
           if [ -f app/build.gradle ]; then
             BUILD_FILE="$PROJECT_DIR/app/build.gradle"
           elif [ -f app/build.gradle.kts ]; then
@@ -234,17 +220,11 @@ jobs:
             exit 1
           fi
 
-          # --------------------------------------------------------
-          # Android Manifest
-          # --------------------------------------------------------
           if [ ! -f app/src/main/AndroidManifest.xml ]; then
             echo "ERROR: AndroidManifest.xml missing."
             exit 1
           fi
 
-          # --------------------------------------------------------
-          # MainActivity
-          # --------------------------------------------------------
           MAIN_ACTIVITY="$(
             find app/src/main \
               -type f \
@@ -270,14 +250,14 @@ jobs:
           echo "Activity: $MAIN_ACTIVITY"
 
       # ============================================================
-      # 9. APPLY VERSION + FIX APPLICATION ID SUFFIX
+      # 9. APPLY AUTOMATIC VERSION
       # ============================================================
-      - name: Apply automatic version and normalize package
+      - name: Apply automatic version
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 \
+          python3 - \
             "$BUILD_FILE" \
             "$VERSION_CODE" \
             "$VERSION_NAME" \
@@ -293,22 +273,401 @@ jobs:
 
           text = build_file.read_text(encoding="utf-8")
 
-          # ========================================================
-          # REMOVE applicationIdSuffix
-          # ========================================================
-          # This is the exact problem from the failed build.
-          #
-          # Examples removed:
-          # applicationIdSuffix ".debug"
-          # applicationIdSuffix = ".debug"
-          # applicationIdSuffix = someVariable
-          #
-          # The source ZIP itself is NOT changed.
-          # Only the extracted build copy is changed.
-          # ========================================================
-
-          suffix_pattern = re.compile(
-              r'(?m)^[ \t]*applicationIdSuffix\b.*\r?\n?'
+          # --------------------------------------------------------
+          # Remove applicationIdSuffix from extracted build copy
+          # --------------------------------------------------------
+          text = re.sub(
+              r'(?m)^[ \t]*applicationIdSuffix\b.*(?:\r?\n|$)',
+              '',
+              text
           )
 
-          text, suffix
+          # --------------------------------------------------------
+          # Update versionCode
+          # --------------------------------------------------------
+          text, code_count = re.subn(
+              r'(?m)^(\s*versionCode\s*(?:=\s*)?)\d+(\s*)$',
+              rf'\g<1>{version_code}\g<2>',
+              text
+          )
+
+          if code_count == 0:
+              raise SystemExit(
+                  "ERROR: versionCode line was not found."
+              )
+
+          # --------------------------------------------------------
+          # Update versionName
+          # --------------------------------------------------------
+          text, name_count = re.subn(
+              r'(?m)^(\s*versionName\s*(?:=\s*)?)(["\']).*?\2(\s*)$',
+              rf'\g<1>"{version_name}"\g<3>',
+              text
+          )
+
+          if name_count == 0:
+              raise SystemExit(
+                  "ERROR: versionName line was not found."
+              )
+
+          # --------------------------------------------------------
+          # Verify applicationId
+          # --------------------------------------------------------
+          app_id_pattern = re.compile(
+              r'(?m)^(\s*applicationId\s*(?:=\s*)?)(["\'])'
+              + re.escape(app_id)
+              + r'\2(\s*)$'
+          )
+
+          if not app_id_pattern.search(text):
+              raise SystemExit(
+                  f"ERROR: applicationId {app_id} was not found."
+              )
+
+          build_file.write_text(text, encoding="utf-8")
+
+          print("============================================")
+          print("AUTOMATIC VERSION APPLIED")
+          print("============================================")
+          print(f"Version Code: {version_code}")
+          print(f"Version Name: {version_name}")
+          print(f"Application : {app_id}")
+          print(f"Build File  : {build_file}")
+          print("============================================")
+          PY
+
+          echo
+          echo "VERSION / PACKAGE LINES:"
+          grep -nE \
+            'versionCode|versionName|applicationId|applicationIdSuffix' \
+            "$BUILD_FILE" || true
+
+      # ============================================================
+      # 10. VERIFY PACKAGE AND VERSION CONFIGURATION
+      # ============================================================
+      - name: Verify package and version configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          grep -Eq \
+            "applicationId[[:space:]]*(=)?[[:space:]]*[\"']${APP_ID}[\"']" \
+            "$BUILD_FILE"
+
+          grep -Eq \
+            "versionCode[[:space:]]*(=)?[[:space:]]*${VERSION_CODE}([[:space:]]|$)" \
+            "$BUILD_FILE"
+
+          grep -Eq \
+            "versionName[[:space:]]*(=)?[[:space:]]*[\"']${VERSION_NAME}[\"']" \
+            "$BUILD_FILE"
+
+          if grep -Eq \
+            '^[[:space:]]*applicationIdSuffix[[:space:]]*=' \
+            "$BUILD_FILE"; then
+            echo "ERROR: applicationIdSuffix still exists."
+            exit 1
+          fi
+
+          echo "PACKAGE AND VERSION CONFIGURATION PASSED."
+
+      # ============================================================
+      # 11. VERIFY SEARCHBOX FIX
+      # ============================================================
+      - name: Verify MainActivity searchBox fix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s "$MAIN_ACTIVITY"
+
+          if ! grep -Eq \
+            'searchBox[[:space:]]*=[[:space:]]*findViewById\(R\.id\.searchBox\)' \
+            "$MAIN_ACTIVITY"; then
+
+            echo "ERROR: searchBox binding not found."
+            exit 1
+          fi
+
+          if ! grep -Eq \
+            'searchBox\.setOnEditorActionListener' \
+            "$MAIN_ACTIVITY"; then
+
+            echo "ERROR: Correct searchBox listener not found."
+            exit 1
+          fi
+
+          if grep -Eq \
+            'findViewById\(R\.id\.searchBox\)\.setOnEditorActionListener' \
+            "$MAIN_ACTIVITY"; then
+
+            echo "ERROR: Unsafe searchBox listener still exists."
+            exit 1
+          fi
+
+          echo "SEARCHBOX FIX CHECK PASSED."
+
+      # ============================================================
+      # 12. OPTIONAL PROJECT VALIDATOR
+      # ============================================================
+      - name: Run project validator
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          if [ -f tools/validate_v20.py ]; then
+            echo "Running V-20 validator..."
+            python3 tools/validate_v20.py
+            echo "V-20 VALIDATOR PASSED."
+          else
+            echo "No tools/validate_v20.py found."
+            echo "Skipping optional validator."
+          fi
+
+      # ============================================================
+      # 13. SET UP GRADLE 8.9
+      # ============================================================
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+          cache-disabled: true
+
+      # ============================================================
+      # 14. PREPARE GRADLE
+      # ============================================================
+      - name: Prepare Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+
+            ./gradlew --version
+
+            echo "GRADLE_COMMAND=./gradlew" >> "$GITHUB_ENV"
+          else
+            gradle --version
+
+            echo "GRADLE_COMMAND=gradle" >> "$GITHUB_ENV"
+          fi
+
+      # ============================================================
+      # 15. CLEAN
+      # ============================================================
+      - name: Clean project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          rm -rf \
+            .gradle \
+            build \
+            app/build
+
+          "$GRADLE_COMMAND" \
+            clean \
+            --no-daemon \
+            --no-build-cache \
+            --stacktrace
+
+          echo "CLEAN PASSED."
+
+      # ============================================================
+      # 16. DUPLICATE CLASS CHECK
+      # ============================================================
+      - name: Check duplicate classes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          "$GRADLE_COMMAND" \
+            :app:checkDebugDuplicateClasses \
+            --no-daemon \
+            --no-build-cache \
+            --stacktrace
+
+          echo "DUPLICATE CLASS CHECK PASSED."
+
+      # ============================================================
+      # 17. BUILD DEBUG APK
+      # ============================================================
+      - name: Build MY SHOP APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "============================================"
+          echo "BUILDING MY SHOP APK"
+          echo "============================================"
+          echo "Version Code: $VERSION_CODE"
+          echo "Version Name: $VERSION_NAME"
+          echo "Package     : $APP_ID"
+          echo "============================================"
+
+          "$GRADLE_COMMAND" \
+            :app:assembleDebug \
+            --no-daemon \
+            --no-build-cache \
+            --rerun-tasks \
+            --stacktrace
+
+          echo
+          echo "GRADLE BUILD PASSED."
+
+      # ============================================================
+      # 18. FIND EXACTLY ONE DEBUG APK
+      # ============================================================
+      - name: Verify exactly one debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t APK_FILES < <(
+            find "$PROJECT_DIR" \
+              -type f \
+              -path "*/build/outputs/apk/debug/*.apk" \
+              -print |
+            sort
+          )
+
+          if [ "${#APK_FILES[@]}" -ne 1 ]; then
+            echo "ERROR: Expected exactly ONE debug APK."
+            echo "Found: ${#APK_FILES[@]}"
+            echo
+            printf '%s\n' "${APK_FILES[@]}"
+            exit 1
+          fi
+
+          APK_FILE="${APK_FILES[0]}"
+
+          echo "APK_FILE=$APK_FILE" >> "$GITHUB_ENV"
+
+          echo
+          echo "APK FOUND:"
+          ls -lh "$APK_FILE"
+
+      # ============================================================
+      # 19. VERIFY APK PACKAGE + VERSION
+      # ============================================================
+      - name: Verify APK package and version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_TOOLS_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/35.0.0"
+          AAPT2="$BUILD_TOOLS_DIR/aapt2"
+
+          if [ ! -x "$AAPT2" ]; then
+            echo "ERROR: aapt2 not found:"
+            echo "$AAPT2"
+            exit 1
+          fi
+
+          BADGING="$(
+            "$AAPT2" dump badging "$APK_FILE"
+          )"
+
+          echo
+          echo "APK BADGING:"
+          echo "$BADGING"
+
+          echo "$BADGING" | grep -q \
+            "package: name='$APP_ID' versionCode='$VERSION_CODE' versionName='$VERSION_NAME'"
+
+          echo
+          echo "APK PACKAGE/VERSION CHECK PASSED."
+
+      # ============================================================
+      # 20. PREPARE FINAL APK
+      # ============================================================
+      - name: Prepare final APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "$GITHUB_WORKSPACE/release"
+          mkdir -p "$GITHUB_WORKSPACE/release"
+
+          FINAL_APK="$GITHUB_WORKSPACE/release/MY-SHOP-v${VERSION_NAME}.apk"
+
+          cp "$APK_FILE" "$FINAL_APK"
+
+          test -s "$FINAL_APK"
+
+          echo "FINAL_APK=$FINAL_APK" >> "$GITHUB_ENV"
+
+          echo
+          echo "============================================"
+          echo "FINAL APK"
+          echo "============================================"
+          ls -lh "$FINAL_APK"
+
+      # ============================================================
+      # 21. APK INTEGRITY + SHA256
+      # ============================================================
+      - name: Verify APK integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          unzip -t "$FINAL_APK" >/dev/null
+
+          sha256sum "$FINAL_APK" \
+            > "$GITHUB_WORKSPACE/release/MY-SHOP-v${VERSION_NAME}.sha256"
+
+          test -s \
+            "$GITHUB_WORKSPACE/release/MY-SHOP-v${VERSION_NAME}.sha256"
+
+          echo
+          echo "SHA256:"
+          cat \
+            "$GITHUB_WORKSPACE/release/MY-SHOP-v${VERSION_NAME}.sha256"
+
+          echo
+          echo "APK INTEGRITY CHECK PASSED."
+
+      # ============================================================
+      # 22. UPLOAD VERSIONED APK
+      # ============================================================
+      - name: Upload MY SHOP APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MY-SHOP-v${{ env.VERSION_NAME }}
+          path: |
+            release/MY-SHOP-v${{ env.VERSION_NAME }}.apk
+            release/MY-SHOP-v${{ env.VERSION_NAME }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      # ============================================================
+      # 23. BUILD SUMMARY
+      # ============================================================
+      - name: Build summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## MY SHOP APK BUILD"
+            echo
+            echo "- Version Code: \`$VERSION_CODE\`"
+            echo "- Version Name: \`$VERSION_NAME\`"
+            echo "- Package: \`$APP_ID\`"
+            echo "- Source ZIP: \`$SOURCE_ZIP\`"
+            echo "- APK: \`MY-SHOP-v${VERSION_NAME}.apk\`"
+            echo
+            echo "### BUILD STATUS"
+            echo "SUCCESS"
+          } >> "$GITHUB_STEP_SUMMARY"
