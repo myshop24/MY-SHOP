@@ -17,7 +17,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and extract MY SHOP source
+      - name: Extract V-19 source
         shell: bash
         run: |
           set -e
@@ -34,28 +34,31 @@ jobs:
 
           unzip -q "$ZIP_FILE" -d source
 
-          echo "Extracted files:"
-          find source -maxdepth 4 -type f | head -100
+          echo "Source extracted successfully."
 
       - name: Locate Android project
         shell: bash
         run: |
           set -e
 
-          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/source" \
-            -name settings.gradle \
-            -o -name settings.gradle.kts \
-            | head -1 \
-            | xargs -r dirname)
+          PROJECT_FILE=$(find "$GITHUB_WORKSPACE/source" \
+            -type f \
+            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            -print -quit)
 
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Android project not found"
-            find "$GITHUB_WORKSPACE/source" -maxdepth 5 -type f
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "ERROR: Android project settings file not found."
+            echo "Files found:"
+            find "$GITHUB_WORKSPACE/source" -maxdepth 6 -type f
             exit 1
           fi
 
+          PROJECT_DIR=$(dirname "$PROJECT_FILE")
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Android project found at: $PROJECT_DIR"
+
+          echo "Android project found:"
+          echo "$PROJECT_DIR"
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -66,39 +69,55 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK
         shell: bash
         run: |
+          set -e
+
           yes | sdkmanager --licenses >/dev/null || true
+
           sdkmanager \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      - name: Set up Gradle
+      - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
 
-      - name: Make Gradle executable
+      - name: Verify Gradle
         shell: bash
         run: |
-          cd "$PROJECT_DIR"
-
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-          else
-            echo "ERROR: gradlew not found"
-            exit 1
-          fi
+          gradle --version
 
       - name: Build APK
         shell: bash
         run: |
+          set -e
+
           cd "$PROJECT_DIR"
-          ./gradlew assembleDebug --stacktrace
+
+          echo "Building Android APK..."
+          gradle --no-daemon assembleDebug --stacktrace
 
       - name: Find APK
         shell: bash
         run: |
+          set -e
+
+          echo "Searching for APK files..."
+
           find "$PROJECT_DIR" \
             -type f \
             -name "*.apk" \
+            -print
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MY-SHOP-V19-APK
+          path: |
+            ${{ env.PROJECT_DIR }}/**/build/outputs/apk/**/*.apk
+            ${{ env.PROJECT_DIR }}/**/build/outputs/apk/*.apk
+          if-no-files-found: error
