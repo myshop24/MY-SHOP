@@ -1,1 +1,150 @@
+name: MY SHOP V-19 APK Build
 
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract V-19 source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="V-19 MY SHOP.zip"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "ERROR: $ZIP_FILE not found"
+            exit 1
+          fi
+
+          rm -rf source
+          mkdir -p source
+
+          unzip -q "$ZIP_FILE" -d source
+
+          PROJECT_DIR="source/V-19_MY_SHOP"
+
+          if [ ! -f "$PROJECT_DIR/settings.gradle" ]; then
+            echo "ERROR: Android project not found"
+            find source -maxdepth 3 -type f | sort
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          yes | sdkmanager --licenses >/dev/null || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Validate V-19 project
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+
+          if [ -f "tools/validate_v19.py" ]; then
+            python3 tools/validate_v19.py
+          fi
+
+      - name: Validate JSON files
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          for path in Path('.').rglob('*.json'):
+              if any(part in {'.git', 'build'} for part in path.parts):
+                  continue
+
+              with path.open(encoding='utf-8') as f:
+                  json.load(f)
+
+              print("OK:", path)
+          PY
+
+      - name: Check Java and Gradle
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          java -version
+          gradle --version
+
+      - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          gradle --no-daemon clean :app:assembleDebug --stacktrace
+
+      - name: Build Release APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          gradle --no-daemon :app:assembleRelease --stacktrace
+
+      - name: Verify APKs
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+
+          DEBUG="app/build/outputs/apk/debug/app-debug.apk"
+          RELEASE="app/build/outputs/apk/release/app-release-unsigned.apk"
+
+          test -s "$DEBUG"
+          test -s "$RELEASE"
+
+          unzip -t "$DEBUG" >/dev/null
+          unzip -t "$RELEASE" >/dev/null
+
+          mkdir -p artifacts
+
+          cp "$DEBUG" \
+            "artifacts/V-19 MY SHOP-debug.apk"
+
+          cp "$RELEASE" \
+            "artifacts/V-19 MY SHOP-release-unsigned.apk"
+
+          sha256sum artifacts/*.apk \
+            | tee artifacts/SHA256SUMS.txt
+
+      - name: Upload APK files
+        uses: actions/upload-artifact@v4
+        with:
+          name: V-19-MY-SHOP-APK
+          if-no-files-found: error
+          path: ${{ env.PROJECT_DIR }}/artifacts/
