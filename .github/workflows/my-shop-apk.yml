@@ -110,14 +110,13 @@ jobs:
               -iname "*.zip" \
               ! -path "$GITHUB_WORKSPACE/.git/*" \
               -print | sort
-
             exit 1
           fi
 
           SOURCE_ZIP="${ZIP_FILES[${#ZIP_FILES[@]}-1]}"
 
           if [ ! -f "$SOURCE_ZIP" ]; then
-            echo "ERROR: Selected source ZIP does not exist."
+            echo "ERROR: Selected source ZIP does not exist:"
             echo "$SOURCE_ZIP"
             exit 1
           fi
@@ -211,40 +210,41 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          if [ -f settings.gradle ]; then
-            echo "settings.gradle found."
-          elif [ -f settings.gradle.kts ]; then
-            echo "settings.gradle.kts found."
-          else
-            echo "ERROR: settings.gradle(.kts) missing."
-            exit 1
-          fi
-
+          # --------------------------------------------------------
+          # Root Gradle
+          # --------------------------------------------------------
           if [ -f build.gradle ]; then
-            echo "build.gradle found."
+            echo "Root build.gradle found."
           elif [ -f build.gradle.kts ]; then
-            echo "build.gradle.kts found."
+            echo "Root build.gradle.kts found."
           else
             echo "ERROR: Root build.gradle(.kts) missing."
             exit 1
           fi
 
+          # --------------------------------------------------------
+          # App Gradle
+          # --------------------------------------------------------
           if [ -f app/build.gradle ]; then
-            BUILD_FILE="app/build.gradle"
+            BUILD_FILE="$PROJECT_DIR/app/build.gradle"
           elif [ -f app/build.gradle.kts ]; then
-            BUILD_FILE="app/build.gradle.kts"
+            BUILD_FILE="$PROJECT_DIR/app/build.gradle.kts"
           else
             echo "ERROR: app/build.gradle(.kts) missing."
             exit 1
           fi
 
-          echo "BUILD_FILE=$PROJECT_DIR/$BUILD_FILE" >> "$GITHUB_ENV"
-
+          # --------------------------------------------------------
+          # Android Manifest
+          # --------------------------------------------------------
           if [ ! -f app/src/main/AndroidManifest.xml ]; then
             echo "ERROR: AndroidManifest.xml missing."
             exit 1
           fi
 
+          # --------------------------------------------------------
+          # MainActivity
+          # --------------------------------------------------------
           MAIN_ACTIVITY="$(
             find app/src/main \
               -type f \
@@ -258,6 +258,7 @@ jobs:
             exit 1
           fi
 
+          echo "BUILD_FILE=$BUILD_FILE" >> "$GITHUB_ENV"
           echo "MAIN_ACTIVITY=$PROJECT_DIR/$MAIN_ACTIVITY" >> "$GITHUB_ENV"
 
           echo
@@ -269,14 +270,18 @@ jobs:
           echo "Activity: $MAIN_ACTIVITY"
 
       # ============================================================
-      # 9. APPLY AUTOMATIC VERSION
+      # 9. APPLY VERSION + FIX APPLICATION ID SUFFIX
       # ============================================================
-      - name: Apply automatic version
+      - name: Apply automatic version and normalize package
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 - "$BUILD_FILE" "$VERSION_CODE" "$VERSION_NAME" <<'PY'
+          python3 \
+            "$BUILD_FILE" \
+            "$VERSION_CODE" \
+            "$VERSION_NAME" \
+            "$APP_ID" <<'PY'
           import re
           import sys
           from pathlib import Path
@@ -284,331 +289,26 @@ jobs:
           build_file = Path(sys.argv[1])
           version_code = sys.argv[2]
           version_name = sys.argv[3]
+          app_id = sys.argv[4]
 
           text = build_file.read_text(encoding="utf-8")
 
-          # --------------------------------------------------------
-          # versionCode
-          # --------------------------------------------------------
-          text, code_count = re.subn(
-              r'(?m)^(\s*versionCode\s*(?:=\s*)?)\d+(\s*)$',
-              rf'\g<1>{version_code}\g<2>',
-              text,
-          )
-
-          if code_count == 0:
-              raise SystemExit(
-                  "ERROR: versionCode line was not found."
-              )
-
-          # --------------------------------------------------------
-          # versionName
-          # --------------------------------------------------------
-          text, name_count = re.subn(
-              r'(?m)^(\s*versionName\s*(?:=\s*)?)(["\'])[^"\']*(\2)(\s*)$',
-              rf'\g<1>"{version_name}"\g<4>',
-              text,
-          )
-
-          if name_count == 0:
-              raise SystemExit(
-                  "ERROR: versionName line was not found."
-              )
-
-          build_file.write_text(text, encoding="utf-8")
-
-          print("============================================")
-          print("AUTOMATIC VERSION APPLIED")
-          print("============================================")
-          print(f"Version Code: {version_code}")
-          print(f"Version Name: {version_name}")
-          print(f"Build File  : {build_file}")
-          print("============================================")
-          PY
-
-          echo
-          echo "VERSION LINES AFTER UPDATE:"
-          grep -nE \
-            'versionCode|versionName|applicationId|applicationIdSuffix' \
-            "$BUILD_FILE" || true
-
-      # ============================================================
-      # 10. FORCE FINAL PACKAGE ID
-      # ============================================================
-      - name: Fix application package
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 - "$BUILD_FILE" "$APP_ID" <<'PY'
-          import re
-          import sys
-          from pathlib import Path
-
-          build_file = Path(sys.argv[1])
-          app_id = sys.argv[2]
-
-          text = build_file.read_text(encoding="utf-8")
-
-          # --------------------------------------------------------
-          # Check applicationId
-          # --------------------------------------------------------
-          if not re.search(
-              r'applicationId\s*(?:=\s*)?["\']' +
-              re.escape(app_id) +
-              r'["\']',
-              text
-          ):
-              raise SystemExit(
-                  f"ERROR: applicationId {app_id} was not found."
-              )
-
-          # --------------------------------------------------------
-          # Remove applicationIdSuffix lines.
+          # ========================================================
+          # REMOVE applicationIdSuffix
+          # ========================================================
+          # This is the exact problem from the failed build.
           #
-          # This is important because debug builds can otherwise
-          # become com.myshop.app.debug and fail final APK checks.
-          # --------------------------------------------------------
-          new_text, suffix_count = re.subn(
-              r'(?m)^[ \t]*applicationIdSuffix[^\n]*\n?',
-              '',
-              text,
+          # Examples removed:
+          # applicationIdSuffix ".debug"
+          # applicationIdSuffix = ".debug"
+          # applicationIdSuffix = someVariable
+          #
+          # The source ZIP itself is NOT changed.
+          # Only the extracted build copy is changed.
+          # ========================================================
+
+          suffix_pattern = re.compile(
+              r'(?m)^[ \t]*applicationIdSuffix\b.*\r?\n?'
           )
 
-          build_file.write_text(
-              new_text,
-              encoding="utf-8"
-          )
-
-          print("============================================")
-          print("APPLICATION PACKAGE CHECK")
-          print("============================================")
-          print(f"Required Package: {app_id}")
-          print(f"applicationIdSuffix lines removed: {suffix_count}")
-          print("============================================")
-          PY
-
-          echo
-          echo "APPLICATION ID CONFIGURATION:"
-          grep -nE \
-            'applicationId|applicationIdSuffix' \
-            "$BUILD_FILE" || true
-
-          if ! grep -Eq \
-            'applicationId[[:space:]]*(=)?[[:space:]]*["'\'']com\.myshop\.app["'\'']' \
-            "$BUILD_FILE"; then
-
-            echo "ERROR: applicationId is not com.myshop.app."
-            exit 1
-          fi
-
-          if grep -Eq \
-            'applicationIdSuffix' \
-            "$BUILD_FILE"; then
-
-            echo "ERROR: applicationIdSuffix is still present."
-            exit 1
-          fi
-
-          echo
-          echo "APPLICATION PACKAGE CONFIGURATION PASSED."
-
-      # ============================================================
-      # 11. VERIFY SEARCHBOX FIX
-      # ============================================================
-      - name: Verify MainActivity searchBox fix
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -s "$MAIN_ACTIVITY"
-
-          if ! grep -Eq \
-            'searchBox[[:space:]]*=[[:space:]]*findViewByIdR\.id\.searchBox' \
-            "$MAIN_ACTIVITY"; then
-
-            echo "ERROR: searchBox binding not found."
-            exit 1
-          fi
-
-          if ! grep -Eq \
-            'searchBox\.setOnEditorActionListener' \
-            "$MAIN_ACTIVITY"; then
-
-            echo "ERROR: Correct searchBox listener not found."
-            exit 1
-          fi
-
-          if grep -Eq \
-            'findViewByIdR\.id\.searchBox\.setOnEditorActionListener' \
-            "$MAIN_ACTIVITY"; then
-
-            echo "ERROR: Unsafe searchBox listener still exists."
-            exit 1
-          fi
-
-          echo "SEARCHBOX FIX CHECK PASSED."
-
-      # ============================================================
-      # 12. V-20 VALIDATOR IF PRESENT
-      # ============================================================
-      - name: Run project validator
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          if [ -f tools/validate_v20.py ]; then
-            echo "Running V-20 validator..."
-            python3 tools/validate_v20.py
-            echo "V-20 VALIDATOR PASSED."
-          else
-            echo "No tools/validate_v20.py found."
-            echo "Skipping optional validator."
-          fi
-
-      # ============================================================
-      # 13. SET UP GRADLE
-      # ============================================================
-      - name: Set up Gradle 8.9
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
-          cache-disabled: true
-
-      # ============================================================
-      # 14. PREPARE GRADLE
-      # ============================================================
-      - name: Prepare Gradle
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          if [ -f ./gradlew ]; then
-            chmod +x ./gradlew
-
-            ./gradlew --version
-
-            echo "GRADLE_COMMAND=./gradlew" >> "$GITHUB_ENV"
-          else
-            gradle --version
-
-            echo "GRADLE_COMMAND=gradle" >> "$GITHUB_ENV"
-          fi
-
-      # ============================================================
-      # 15. CLEAN
-      # ============================================================
-      - name: Clean project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          rm -rf \
-            .gradle \
-            build \
-            app/build
-
-          "$GRADLE_COMMAND" \
-            clean \
-            --no-daemon \
-            --no-build-cache \
-            --stacktrace
-
-          echo "CLEAN PASSED."
-
-      # ============================================================
-      # 16. DUPLICATE CLASS CHECK
-      # ============================================================
-      - name: Check duplicate classes
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          "$GRADLE_COMMAND" \
-            :app:checkDebugDuplicateClasses \
-            --no-daemon \
-            --no-build-cache \
-            --stacktrace
-
-          echo "DUPLICATE CLASS CHECK PASSED."
-
-      # ============================================================
-      # 17. BUILD DEBUG APK
-      # ============================================================
-      - name: Build MY SHOP APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          echo "============================================"
-          echo "BUILDING MY SHOP APK"
-          echo "============================================"
-          echo "Version Code: $VERSION_CODE"
-          echo "Version Name: $VERSION_NAME"
-          echo "Package     : $APP_ID"
-          echo "============================================"
-
-          "$GRADLE_COMMAND" \
-            :app:assembleDebug \
-            --no-daemon \
-            --no-build-cache \
-            --rerun-tasks \
-            --stacktrace
-
-          echo
-          echo "GRADLE BUILD PASSED."
-
-      # ============================================================
-      # 18. FIND EXACTLY ONE DEBUG APK
-      # ============================================================
-      - name: Verify exactly one debug APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mapfile -t APK_FILES < <(
-            find "$PROJECT_DIR" \
-              -type f \
-              -path "*/build/outputs/apk/debug/*.apk" \
-              -print \
-              | sort
-          )
-
-          if [ "${#APK_FILES[@]}" -ne 1 ]; then
-            echo "ERROR: Expected exactly ONE debug APK."
-            echo "Found: ${#APK_FILES[@]}"
-            echo
-            printf '%s\n' "${APK_FILES[@]}"
-            exit 1
-          fi
-
-          APK_FILE="${APK_FILES[0]}"
-
-          echo "APK_FILE=$APK_FILE" >> "$GITHUB_ENV"
-
-          echo
-          echo "APK FOUND:"
-          ls -lh "$APK_FILE"
-
-      # ============================================================
-      # 19. VERIFY APK PACKAGE + VERSION
-      # ============================================================
-      - name: Verify APK package and version
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          BUILD_TOOLS_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/35.0.0"
-          AAPT2="$BUILD_TOOLS_DIR/aapt2"
-
-          if [ ! -x "$
+          text, suffix
