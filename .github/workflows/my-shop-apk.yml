@@ -1,4 +1,4 @@
-name: MY SHOP V-59 ONE RELEASE APK
+name: MY SHOP V-59 ONE RELEASE APK — FIXED SOURCE SELECTION
 
 on:
   workflow_dispatch:
@@ -31,36 +31,37 @@ jobs:
         run: |
           set -euo pipefail
 
-          mapfile -t candidates < <(
-            find . -maxdepth 1 -type f -iname '*V-57*MY_SHOP*.zip' -print | sort
+          # The repository currently contains two V-57 source archives:
+          #   V-57_MY_SHOP_CORRECTED_SOURCE.zip
+          #   V-57_MY_SHOP_CORRECTED_SOURCE_FIXED.zip
+          # They are both structurally valid, so a raw "exactly one" scan is
+          # ambiguous.  Use the FIXED archive as the authoritative source.
+          preferred=(
+            "./V-57_MY_SHOP_CORRECTED_SOURCE_FIXED.zip"
+            "./V-57_MY_SHOP_CORRECTED_SOURCE.zip"
           )
 
-          echo "Candidate source ZIPs:"
-          printf '%s\n' "${candidates[@]:-<none>}"
-
-          if [ "${#candidates[@]}" -eq 0 ]; then
-            echo "::error::No V57 MY SHOP source ZIP found."
-            exit 1
-          fi
-
-          valid=()
-          for zip in "${candidates[@]}"; do
-            if unzip -Z1 "$zip" | grep -Eq '(^|/)gradlew$' \
-              && unzip -Z1 "$zip" | grep -Eq '(^|/)settings\.gradle(\.kts)?$' \
-              && unzip -Z1 "$zip" | grep -Eq '(^|/)build\.gradle(\.kts)?$'; then
-              valid+=("$zip")
+          chosen=""
+          for zip in "${preferred[@]}"; do
+            if [ -f "$zip" ]; then
+              if unzip -Z1 "$zip" | grep -Eq '(^|/)gradlew$' \
+                && unzip -Z1 "$zip" | grep -Eq '(^|/)settings\.gradle(\.kts)?$' \
+                && unzip -Z1 "$zip" | grep -Eq '(^|/)build\.gradle(\.kts)?$'; then
+                chosen="$zip"
+                break
+              fi
             fi
           done
 
-          if [ "${#valid[@]}" -ne 1 ]; then
-            echo "::error::Exactly ONE valid Android source ZIP is required."
-            echo "Valid source ZIP count: ${#valid[@]}"
-            printf '%s\n' "${valid[@]:-<none>}"
+          if [ -z "$chosen" ]; then
+            echo "::error::No complete V-57 MY SHOP Android source archive was found."
+            echo "Expected one of:"
+            printf '  %s\n' "${preferred[@]}"
             exit 1
           fi
 
-          echo "chosen=${valid[0]}" >> "$GITHUB_OUTPUT"
-          echo "Selected source: ${valid[0]}"
+          echo "Selected authoritative source: $chosen"
+          echo "chosen=$chosen" >> "$GITHUB_OUTPUT"
 
       - name: Extract source
         shell: bash
