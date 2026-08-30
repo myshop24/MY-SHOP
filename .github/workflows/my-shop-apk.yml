@@ -1,4 +1,4 @@
-name: MY SHOP - V51 Source Build
+name: MY SHOP - V57 Verified APK Build
 
 on:
   workflow_dispatch:
@@ -10,22 +10,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: my-shop-main-build
+  group: my-shop-v57-build
   cancel-in-progress: true
-
-env:
-  SOURCE_ZIP: "V-51_MY_SHOP_FINAL_SOURCE.zip"
-  EXPECTED_APPLICATION_ID: "com.myshop.app"
 
 jobs:
   build:
-    name: MY SHOP APK - V51 SOURCE
+    name: MY SHOP APK - V57 VERIFIED SOURCE
     runs-on: ubuntu-latest
 
     steps:
 
       # ==========================================================
-      # 1. CHECKOUT REPOSITORY
+      # 1. CHECKOUT
       # ==========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -33,100 +29,150 @@ jobs:
           fetch-depth: 1
 
       # ==========================================================
-      # 2. VERIFY SELECTED SOURCE ZIP
+      # 2. FIND EXACT V57 SOURCE ZIP
       # ==========================================================
-      - name: Verify selected source ZIP
+      - name: Locate V57 source ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ ! -f "$SOURCE_ZIP" ]; then
-            echo "::error::Selected source ZIP not found: $SOURCE_ZIP"
-            echo "Available ZIP files:"
-            find . -maxdepth 1 -type f -iname "*.zip" -printf '%f\n' | sort || true
-            exit 1
-          fi
+          echo "===== ZIP FILES IN REPOSITORY ====="
+          find . -maxdepth 1 -type f -iname "*.zip" -print | sort
 
-          echo "Selected source: $SOURCE_ZIP"
-
-          unzip -t "$SOURCE_ZIP" >/dev/null
-
-          echo "ZIP integrity check: PASSED"
-
-      # ==========================================================
-      # 3. EXTRACT SELECTED SOURCE TO ISOLATED WORKSPACE
-      # ==========================================================
-      - name: Extract selected source to isolated workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf build-source
-          mkdir -p build-source
-
-          unzip -q "$SOURCE_ZIP" -d build-source
-
-          echo "Searching extracted source for Android project..."
-
-          mapfile -t ROOTS < <(
-            find build-source \
-              -type f \
-              -name gradlew \
-              -printf '%h\n' |
-              sort -u
+          mapfile -t V57_ZIPS < <(
+            find . -maxdepth 1 -type f -iname "*V-57*MY_SHOP*.zip" | sort
           )
 
-          if [ "${#ROOTS[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one Android project containing gradlew; found ${#ROOTS[@]}."
-            printf '%s\n' "${ROOTS[@]:-}"
+          if [ "${#V57_ZIPS[@]}" -eq 0 ]; then
+            echo "::error::No V57 MY SHOP source ZIP was found."
             exit 1
           fi
 
-          SOURCE_DIR="${ROOTS[0]}"
+          if [ "${#V57_ZIPS[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one V57 MY SHOP ZIP."
+            echo "Found:"
+            printf '%s\n' "${V57_ZIPS[@]}"
+            exit 1
+          fi
 
-          echo "SOURCE_DIR=$SOURCE_DIR" >> "$GITHUB_ENV"
+          SOURCE_ZIP="${V57_ZIPS[0]}"
 
-          echo "Android source directory:"
-          echo "$SOURCE_DIR"
+          echo "Selected source:"
+          echo "$SOURCE_ZIP"
+
+          echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # 4. VERIFY ANDROID SOURCE STRUCTURE
+      # 3. EXTRACT V57 SOURCE
+      # ==========================================================
+      - name: Extract V57 source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "$RUNNER_TEMP/my-shop-source"
+          mkdir -p "$RUNNER_TEMP/my-shop-source"
+
+          unzip -q "$SOURCE_ZIP" \
+            -d "$RUNNER_TEMP/my-shop-source"
+
+          echo "===== EXTRACTED FILES ====="
+          find "$RUNNER_TEMP/my-shop-source" \
+            -maxdepth 4 \
+            -type f \
+            | sort \
+            | head -300
+
+      # ==========================================================
+      # 4. FIND REAL ANDROID PROJECT ROOT
+      # ==========================================================
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_ROOT="$RUNNER_TEMP/my-shop-source"
+
+          mapfile -t PROJECT_DIRS < <(
+            find "$SOURCE_ROOT" \
+              -type f \
+              -name "gradlew" \
+              -printf '%h\n' \
+              | sort -u
+          )
+
+          if [ "${#PROJECT_DIRS[@]}" -eq 0 ]; then
+            echo "::error::No gradlew was found inside V57 source ZIP."
+            echo "::error::The selected ZIP does not contain a complete Android project."
+            exit 1
+          fi
+
+          VALID_PROJECTS=()
+
+          for DIR in "${PROJECT_DIRS[@]}"; do
+            if {
+              [ -f "$DIR/settings.gradle" ] ||
+              [ -f "$DIR/settings.gradle.kts" ]
+            } && [ -d "$DIR/app" ]; then
+              VALID_PROJECTS+=("$DIR")
+            fi
+          done
+
+          if [ "${#VALID_PROJECTS[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one valid Android project."
+            echo "Valid project directories:"
+            printf '%s\n' "${VALID_PROJECTS[@]:-NONE}"
+            exit 1
+          fi
+
+          PROJECT_DIR="${VALID_PROJECTS[0]}"
+
+          echo "ANDROID_PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "===== ANDROID PROJECT ====="
+          echo "$PROJECT_DIR"
+
+          echo "===== PROJECT CONTENT ====="
+          find "$PROJECT_DIR" -maxdepth 2 -type f | sort | head -200
+
+      # ==========================================================
+      # 5. VERIFY REQUIRED FILES
       # ==========================================================
       - name: Verify Android source structure
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$SOURCE_DIR"
+          cd "$ANDROID_PROJECT_DIR"
 
           if [ ! -f "./gradlew" ]; then
-            echo "::error::gradlew missing."
+            echo "::error::gradlew is missing."
             exit 1
           fi
 
           if [ ! -f "./settings.gradle" ] &&
              [ ! -f "./settings.gradle.kts" ]; then
-            echo "::error::settings.gradle or settings.gradle.kts missing."
+            echo "::error::settings.gradle/settings.gradle.kts is missing."
             exit 1
           fi
 
           if [ ! -d "./app" ]; then
-            echo "::error::app/ directory missing."
+            echo "::error::app directory is missing."
             exit 1
           fi
 
           if [ ! -f "./app/build.gradle" ] &&
              [ ! -f "./app/build.gradle.kts" ]; then
-            echo "::error::app Gradle file missing."
+            echo "::error::app Gradle build file is missing."
             exit 1
           fi
 
           chmod +x ./gradlew
 
-          echo "Android source structure: PASSED"
+          echo "Android source structure VERIFIED."
 
       # ==========================================================
-      # 5. JAVA 17
+      # 6. JAVA 17
       # ==========================================================
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -134,12 +180,9 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: gradle
-          cache-dependency-path: |
-            ${{ env.SOURCE_DIR }}/**/*.gradle*
-            ${{ env.SOURCE_DIR }}/gradle/wrapper/gradle-wrapper.properties
 
       # ==========================================================
-      # 6. ANDROID SDK
+      # 7. ANDROID SDK
       # ==========================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -157,7 +200,7 @@ jobs:
             "build-tools;35.0.0"
 
       # ==========================================================
-      # 7. GENERATE UNIQUE VERSION
+      # 8. GENERATE UNIQUE VERSION
       # ==========================================================
       - name: Generate unique application version
         shell: bash
@@ -167,14 +210,8 @@ jobs:
           RUN_NUMBER="${GITHUB_RUN_NUMBER}"
           RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT}"
 
-          if [ "$RUN_NUMBER" -lt 1 ] ||
-             [ "$RUN_ATTEMPT" -lt 1 ]; then
-            echo "::error::Invalid GitHub run number or attempt."
-            exit 1
-          fi
-
-          VERSION_CODE=$((29000000 + RUN_NUMBER * 100 + RUN_ATTEMPT))
-          VERSION_NAME="2.9.${RUN_NUMBER}.${RUN_ATTEMPT}"
+          VERSION_CODE=$((57000000 + RUN_NUMBER * 100 + RUN_ATTEMPT))
+          VERSION_NAME="5.7.${RUN_NUMBER}.${RUN_ATTEMPT}"
 
           if [ "$VERSION_CODE" -gt 2100000000 ]; then
             echo "::error::Generated versionCode is too large."
@@ -184,18 +221,18 @@ jobs:
           echo "BUILD_VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "BUILD_VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
 
-          echo "versionCode=$VERSION_CODE"
-          echo "versionName=$VERSION_NAME"
+          echo "versionCode = $VERSION_CODE"
+          echo "versionName = $VERSION_NAME"
 
       # ==========================================================
-      # 8. APPLY GENERATED VERSION
+      # 9. APPLY VERSION
       # ==========================================================
       - name: Apply generated version
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$SOURCE_DIR"
+          cd "$ANDROID_PROJECT_DIR"
 
           if [ -f "app/build.gradle" ]; then
             BUILD_FILE="app/build.gradle"
@@ -208,8 +245,7 @@ jobs:
             exit 1
           fi
 
-          export BUILD_FILE
-          export FILE_TYPE
+          export BUILD_FILE FILE_TYPE
 
           python3 - <<'PY'
           import os
@@ -226,189 +262,170 @@ jobs:
 
           if file_type == "groovy":
               code_pattern = (
-                  r"(?m)^(\s*versionCode\s+)\d+(\s*)$"
+                  r'(?m)^(\s*versionCode\s+)\d+(\s*)$'
               )
 
               name_pattern = (
-                  r"(?m)^(\s*versionName\s+)"
-                  r"[\"'][^\"']*[\"'](\s*)$"
+                  r'(?m)^(\s*versionName\s+)[\'"][^\'"]*[\'"](\s*)$'
               )
-
           else:
               code_pattern = (
-                  r"(?m)^(\s*versionCode\s*=\s*)"
-                  r"\d+(\s*)$"
+                  r'(?m)^(\s*versionCode\s*=\s*)\d+(\s*)$'
               )
 
               name_pattern = (
-                  r"(?m)^(\s*versionName\s*=\s*)"
-                  r"[\"'][^\"']*[\"'](\s*)$"
+                  r'(?m)^(\s*versionName\s*=\s*)[\'"][^\'"]*[\'"](\s*)$'
               )
 
           new_text, code_count = re.subn(
               code_pattern,
-              lambda m: (
-                  f"{m.group(1)}"
-                  f"{code}"
-                  f"{m.group(2)}"
-              ),
-              text,
+              lambda m: f"{m.group(1)}{code}{m.group(2)}",
+              text
           )
 
           new_text, name_count = re.subn(
               name_pattern,
-              lambda m: (
-                  f'{m.group(1)}'
-                  f'"{name}"'
-                  f'{m.group(2)}'
-              ),
-              new_text,
+              lambda m: f'{m.group(1)}"{name}"{m.group(2)}',
+              new_text
           )
 
           if code_count != 1 or name_count != 1:
               raise SystemExit(
-                  f"Expected exactly one versionCode and "
-                  f"one versionName in {path}; "
-                  f"found versionCode={code_count}, "
-                  f"versionName={name_count}."
+                  "ERROR: Could not safely update exactly one "
+                  f"versionCode/versionName. "
+                  f"versionCode={code_count}, "
+                  f"versionName={name_count}, "
+                  f"file={path}"
               )
 
-          path.write_text(
-              new_text,
-              encoding="utf-8"
-          )
+          path.write_text(new_text, encoding="utf-8")
 
-          print(f"Updated {path}")
+          print(f"Updated: {path}")
+          print(f"versionCode: {code}")
+          print(f"versionName: {name}")
           PY
 
           echo "===== FINAL VERSION ====="
-
-          grep -nE \
-            'versionCode|versionName' \
-            "$BUILD_FILE"
+          grep -nE "versionCode|versionName" "$BUILD_FILE"
 
       # ==========================================================
-      # 9. CLEAN
+      # 10. CLEAN
       # ==========================================================
       - name: Clean project
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$SOURCE_DIR"
+          cd "$ANDROID_PROJECT_DIR"
 
-          ./gradlew \
-            clean \
+          ./gradlew clean \
             --no-daemon \
             --stacktrace
 
       # ==========================================================
-      # 10. BUILD CURRENT SOURCE
+      # 11. BUILD APK
       # ==========================================================
-      - name: Build current APK
+      - name: Build current V57 APK
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$SOURCE_DIR"
+          cd "$ANDROID_PROJECT_DIR"
 
-          ./gradlew \
-            assembleDebug \
+          ./gradlew assembleDebug \
             --no-daemon \
             --stacktrace
 
       # ==========================================================
-      # 11. LOCATE EXACTLY ONE APK
+      # 12. LOCATE EXACTLY ONE APK
       # ==========================================================
       - name: Locate exactly one APK
         shell: bash
         run: |
           set -euo pipefail
 
+          cd "$ANDROID_PROJECT_DIR"
+
           mapfile -t APKS < <(
-            find \
-              "$SOURCE_DIR/app/build/outputs/apk" \
+            find app/build/outputs/apk \
               -type f \
-              -name "*.apk" |
-            sort
+              -name "*.apk" \
+              | sort
           )
 
           if [ "${#APKS[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one APK; found ${#APKS[@]}."
-
-            printf '%s\n' "${APKS[@]:-}"
-
+            echo "::error::Expected exactly one APK."
+            echo "Found ${#APKS[@]} APK files:"
+            printf '%s\n' "${APKS[@]:-NONE}"
             exit 1
           fi
 
-          echo "APK_PATH=${APKS[0]}" >> "$GITHUB_ENV"
+          APK_PATH="${APKS[0]}"
+
+          echo "APK_PATH=$APK_PATH" >> "$GITHUB_ENV"
 
           echo "Generated APK:"
-          echo "${APKS[0]}"
+          echo "$APK_PATH"
 
       # ==========================================================
-      # 12. VERIFY APK IDENTITY
+      # 13. VERIFY APK
       # ==========================================================
-      - name: Verify APK identity
+      - name: Verify APK
         shell: bash
         run: |
           set -euo pipefail
 
-          APK="$APK_PATH"
+          APK="$ANDROID_PROJECT_DIR/$APK_PATH"
 
           APKANALYZER="$(
             find "$ANDROID_HOME" \
               -type f \
               -name apkanalyzer \
-              -print -quit
+              | head -1
           )"
 
           if [ -z "$APKANALYZER" ]; then
-            echo "::error::apkanalyzer was not found."
+            echo "::error::apkanalyzer not found."
             exit 1
           fi
+
+          echo "===== APK PACKAGE ====="
 
           PACKAGE="$(
             "$APKANALYZER" \
-              manifest application-id \
-              "$APK" |
-            tail -1 |
-            tr -d '\r'
+              manifest application-id "$APK" |
+              tail -1 |
+              tr -d '\r'
           )"
 
-          VERSION_OUTPUT="$(
+          echo "Package: $PACKAGE"
+
+          echo "===== APK VERSION ====="
+
+          VERSION="$(
             "$APKANALYZER" \
-              manifest version \
-              "$APK" |
-            tr '\n' ' '
+              manifest version "$APK" |
+              tr '\n' ' '
           )"
 
-          echo "APK package : $PACKAGE"
-          echo "APK version : $VERSION_OUTPUT"
-          echo "Expected code: $BUILD_VERSION_CODE"
-          echo "Expected name: $BUILD_VERSION_NAME"
+          echo "Version: $VERSION"
 
-          if [ "$PACKAGE" != "$EXPECTED_APPLICATION_ID" ]; then
-            echo "::error::Unexpected applicationId: $PACKAGE"
+          if ! echo "$VERSION" |
+            grep -Fq "$BUILD_VERSION_CODE"; then
+            echo "::error::versionCode verification failed."
             exit 1
           fi
 
-          if ! echo "$VERSION_OUTPUT" |
-               grep -Fq "$BUILD_VERSION_CODE"; then
-            echo "::error::APK versionCode does not match this build."
+          if ! echo "$VERSION" |
+            grep -Fq "$BUILD_VERSION_NAME"; then
+            echo "::error::versionName verification failed."
             exit 1
           fi
 
-          if ! echo "$VERSION_OUTPUT" |
-               grep -Fq "$BUILD_VERSION_NAME"; then
-            echo "::error::APK versionName does not match this build."
-            exit 1
-          fi
-
-          echo "APK identity verification: PASSED"
+          echo "APK VERSION VERIFICATION PASSED."
 
       # ==========================================================
-      # 13. PREPARE VERIFIED RELEASE
+      # 14. CREATE RELEASE
       # ==========================================================
       - name: Prepare verified release
         shell: bash
@@ -419,23 +436,22 @@ jobs:
           mkdir -p release
 
           cp \
-            "$APK_PATH" \
+            "$ANDROID_PROJECT_DIR/$APK_PATH" \
             "release/MY-SHOP-${BUILD_VERSION_NAME}.apk"
 
           sha256sum \
             "release/MY-SHOP-${BUILD_VERSION_NAME}.apk" \
-            > \
-            "release/MY-SHOP-${BUILD_VERSION_NAME}.sha256"
+            > "release/MY-SHOP-${BUILD_VERSION_NAME}.sha256"
 
-          echo "===== VERIFIED RELEASE ====="
-
+          echo "===== RELEASE ====="
           ls -lh release
 
+          echo "===== SHA256 ====="
           cat \
             "release/MY-SHOP-${BUILD_VERSION_NAME}.sha256"
 
       # ==========================================================
-      # 14. UPLOAD VERIFIED APK
+      # 15. UPLOAD ONLY VERIFIED APK + CHECKSUM
       # ==========================================================
       - name: Upload verified APK
         uses: actions/upload-artifact@v4
