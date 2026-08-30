@@ -1,4 +1,4 @@
-name: MY SHOP V-58 APK BUILD
+name: MY SHOP V-58 VERIFIED APK BUILD
 
 on:
   workflow_dispatch:
@@ -11,6 +11,7 @@ permissions:
 
 env:
   SOURCE_DIR: v57_source
+  SOURCE_ZIP: V-57_MY_SHOP_CORRECTED_SOURCE_FIXED.zip
 
 jobs:
   build:
@@ -24,148 +25,92 @@ jobs:
       # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
 
       # ============================================================
-      # 2. FIND CORRECT V57 SOURCE
+      # 2. SELECT EXACT FIXED V57 SOURCE
+      #
+      # IMPORTANT:
+      # Other V57 ZIP files are ignored.
+      # Only SOURCE_ZIP is allowed.
       # ============================================================
-      - name: Locate V57 Android source
+      - name: Locate exact V57 fixed source
         id: source
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "===== V57 SOURCE ZIP SEARCH ====="
-
-          mapfile -t candidates < <(
-            find . -maxdepth 1 -type f \
-              \( -iname 'V-57*MY_SHOP*.zip' -o -iname 'V57*MY_SHOP*.zip' \) \
-              -print | sort
-          )
-
-          if [ "${#candidates[@]}" -eq 0 ]; then
-            echo "ERROR: No V57 MY SHOP ZIP found."
-            exit 1
-          fi
-
-          echo "Found V57 ZIP files:"
-          printf '%s\n' "${candidates[@]}"
-
-          echo ""
-          echo "===== VALIDATING ZIP FILES ====="
-
-          root_valid=()
-          corrected_valid=()
-          other_valid=()
-
-          for zip in "${candidates[@]}"; do
-
-            echo ""
-            echo "Checking:"
-            echo "$zip"
-
-            has_gradlew=0
-            has_settings=0
-            has_build=0
-
-            if unzip -Z1 "$zip" | grep -Eq '(^|/)gradlew$'; then
-              has_gradlew=1
-            fi
-
-            if unzip -Z1 "$zip" | grep -Eq '(^|/)settings\.gradle(\.kts)?$'; then
-              has_settings=1
-            fi
-
-            if unzip -Z1 "$zip" | grep -Eq '(^|/)build\.gradle(\.kts)?$'; then
-              has_build=1
-            fi
-
-            echo "gradlew  : $has_gradlew"
-            echo "settings : $has_settings"
-            echo "build    : $has_build"
-
-            if [ "$has_gradlew" -eq 1 ] &&
-               [ "$has_settings" -eq 1 ] &&
-               [ "$has_build" -eq 1 ]; then
-
-              echo "VALID ANDROID SOURCE"
-
-              filename="$(basename "$zip")"
-
-              if [[ "$filename" == *CORRECTED_SOURCE_ROOT* ]]; then
-                root_valid+=("$zip")
-
-              elif [[ "$filename" == *CORRECTED_SOURCE* ]]; then
-                corrected_valid+=("$zip")
-
-              else
-                other_valid+=("$zip")
-              fi
-
-            else
-              echo "IGNORED: incomplete Android project"
-            fi
-
-          done
-
-
-          # ========================================================
-          # PRIORITY:
-          # 1. CORRECTED_SOURCE_ROOT
-          # 2. CORRECTED_SOURCE
-          # 3. Other valid V57 source
-          # ========================================================
-
-          selected=""
-
-          if [ "${#root_valid[@]}" -eq 1 ]; then
-            selected="${root_valid[0]}"
-
-          elif [ "${#root_valid[@]}" -gt 1 ]; then
-            echo ""
-            echo "ERROR: More than one CORRECTED_SOURCE_ROOT ZIP is valid."
-            printf '%s\n' "${root_valid[@]}"
-            exit 1
-
-          elif [ "${#corrected_valid[@]}" -eq 1 ]; then
-            selected="${corrected_valid[0]}"
-
-          elif [ "${#corrected_valid[@]}" -gt 1 ]; then
-            echo ""
-            echo "ERROR: More than one CORRECTED_SOURCE ZIP is valid."
-            printf '%s\n' "${corrected_valid[@]}"
-            exit 1
-
-          elif [ "${#other_valid[@]}" -eq 1 ]; then
-            selected="${other_valid[0]}"
-
-          elif [ "${#other_valid[@]}" -gt 1 ]; then
-            echo ""
-            echo "ERROR: More than one other valid V57 source ZIP exists."
-            printf '%s\n' "${other_valid[@]}"
-            exit 1
-          fi
-
-
-          if [ -z "$selected" ]; then
-            echo ""
-            echo "ERROR: No valid V57 Android source ZIP found."
-            echo ""
-            echo "A valid source must contain:"
-            echo "  gradlew"
-            echo "  settings.gradle or settings.gradle.kts"
-            echo "  build.gradle or build.gradle.kts"
-            exit 1
-          fi
-
-
-          echo ""
           echo "=========================================="
-          echo "SELECTED V57 SOURCE"
-          echo "$selected"
+          echo "MY SHOP V-58 SOURCE SELECTION"
           echo "=========================================="
 
-          echo "chosen=$selected" >> "$GITHUB_OUTPUT"
+          ZIP="./${SOURCE_ZIP}"
+
+          echo "Required source:"
+          echo "$ZIP"
+
+          if [ ! -f "$ZIP" ]; then
+            echo ""
+            echo "ERROR: Required V57 FIXED source ZIP was not found."
+            echo "Expected:"
+            echo "$ZIP"
+            echo ""
+            echo "ZIP files currently found in repository root:"
+            find . -maxdepth 1 -type f -iname "*.zip" -print | sort
+            exit 1
+          fi
+
+          echo ""
+          echo "===== ZIP INTEGRITY TEST ====="
+
+          unzip -t "$ZIP" >/dev/null
+
+          echo "ZIP integrity: PASSED"
+
+          echo ""
+          echo "===== ANDROID SOURCE CHECK ====="
+
+          HAS_GRADLEW=0
+          HAS_SETTINGS=0
+          HAS_BUILD=0
+
+          if unzip -Z1 "$ZIP" | grep -Eq '(^|/)gradlew$'; then
+            HAS_GRADLEW=1
+          fi
+
+          if unzip -Z1 "$ZIP" | grep -Eq '(^|/)settings\.gradle(\.kts)?$'; then
+            HAS_SETTINGS=1
+          fi
+
+          if unzip -Z1 "$ZIP" | grep -Eq '(^|/)build\.gradle(\.kts)?$'; then
+            HAS_BUILD=1
+          fi
+
+          echo "gradlew  : $HAS_GRADLEW"
+          echo "settings : $HAS_SETTINGS"
+          echo "build    : $HAS_BUILD"
+
+          if [ "$HAS_GRADLEW" -ne 1 ]; then
+            echo "ERROR: gradlew not found in selected ZIP."
+            exit 1
+          fi
+
+          if [ "$HAS_SETTINGS" -ne 1 ]; then
+            echo "ERROR: settings.gradle/settings.gradle.kts not found."
+            exit 1
+          fi
+
+          if [ "$HAS_BUILD" -ne 1 ]; then
+            echo "ERROR: build.gradle/build.gradle.kts not found."
+            exit 1
+          fi
+
+          echo ""
+          echo "V57 FIXED SOURCE VALIDATION: PASSED"
+
+          echo "chosen=$ZIP" >> "$GITHUB_OUTPUT"
 
 
       # ============================================================
@@ -182,11 +127,17 @@ jobs:
           unzip -q "${{ steps.source.outputs.chosen }}" \
             -d "$SOURCE_DIR"
 
-          echo "V57 source extracted successfully."
+          echo "Source extracted."
+
+          echo ""
+          echo "Top-level extracted directories:"
+          find "$SOURCE_DIR" -maxdepth 2 -type f \
+            \( -name "gradlew" -o -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            -print
 
 
       # ============================================================
-      # 4. LOCATE ANDROID PROJECT
+      # 4. LOCATE ANDROID PROJECT ROOT
       # ============================================================
       - name: Locate Android project root
         id: project
@@ -194,84 +145,92 @@ jobs:
         run: |
           set -euo pipefail
 
-          project_root=""
+          PROJECT_ROOT=""
 
-          if [ -f "$SOURCE_DIR/gradlew" ]; then
-            project_root="$SOURCE_DIR"
+          while IFS= read -r GRADLEW; do
 
-          else
+            CANDIDATE="$(dirname "$GRADLEW")"
 
-            while IFS= read -r gradlew; do
+            if [ -f "$CANDIDATE/settings.gradle" ] ||
+               [ -f "$CANDIDATE/settings.gradle.kts" ]; then
 
-              candidate="$(dirname "$gradlew")"
+              if [ -f "$CANDIDATE/build.gradle" ] ||
+                 [ -f "$CANDIDATE/build.gradle.kts" ]; then
 
-              if [ -f "$candidate/settings.gradle" ] ||
-                 [ -f "$candidate/settings.gradle.kts" ]; then
-
-                project_root="$candidate"
+                PROJECT_ROOT="$CANDIDATE"
                 break
 
               fi
+            fi
 
-            done < <(
-              find "$SOURCE_DIR" \
-                -type f \
-                -name "gradlew" \
-                -print
-            )
+          done < <(
+            find "$SOURCE_DIR" \
+              -type f \
+              -name "gradlew" \
+              -print
+          )
 
-          fi
-
-
-          if [ -z "$project_root" ]; then
-            echo "ERROR: Android Gradle project not found."
+          if [ -z "$PROJECT_ROOT" ]; then
+            echo "ERROR: Android Gradle project root not found."
             exit 1
           fi
 
+          echo ""
+          echo "=========================================="
+          echo "ANDROID PROJECT ROOT"
+          echo "$PROJECT_ROOT"
+          echo "=========================================="
 
-          echo "Android project root:"
-          echo "$project_root"
-
-          echo "root=$project_root" >> "$GITHUB_OUTPUT"
+          echo "root=$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
 
 
       # ============================================================
-      # 5. VERIFY ANDROID SOURCE
+      # 5. VERIFY ANDROID PROJECT STRUCTURE
       # ============================================================
-      - name: Verify Android source structure
+      - name: Verify Android project structure
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "${{ steps.project.outputs.root }}"
+          ROOT="${{ steps.project.outputs.root }}"
+
+          cd "$ROOT"
+
+          echo "===== PROJECT STRUCTURE ====="
 
           test -f gradlew
 
           if [ -f settings.gradle ]; then
-            echo "settings.gradle found"
+            echo "settings.gradle: FOUND"
           elif [ -f settings.gradle.kts ]; then
-            echo "settings.gradle.kts found"
+            echo "settings.gradle.kts: FOUND"
           else
-            echo "ERROR: settings.gradle not found."
+            echo "ERROR: settings file missing."
             exit 1
           fi
-
 
           if [ -f build.gradle ]; then
-            echo "build.gradle found"
+            echo "build.gradle: FOUND"
           elif [ -f build.gradle.kts ]; then
-            echo "build.gradle.kts found"
+            echo "build.gradle.kts: FOUND"
           else
-            echo "ERROR: build.gradle not found."
+            echo "ERROR: root build file missing."
             exit 1
           fi
 
+          if [ -f app/build.gradle ]; then
+            echo "app/build.gradle: FOUND"
+          elif [ -f app/build.gradle.kts ]; then
+            echo "app/build.gradle.kts: FOUND"
+          else
+            echo "ERROR: app/build.gradle/app/build.gradle.kts missing."
+            exit 1
+          fi
 
           chmod +x gradlew
 
           echo ""
           echo "===== GRADLE VERSION ====="
-
           ./gradlew --version
 
 
@@ -307,200 +266,273 @@ jobs:
 
 
       # ============================================================
-      # 8. GENERATE NEW VERSION
+      # 8. GENERATE UNIQUE V58 VERSION
       # ============================================================
-      - name: Generate unique build version
+      - name: Generate V58 application version
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION_CODE="$((100000 + GITHUB_RUN_NUMBER))"
-          VERSION_NAME="5.8.${GITHUB_RUN_NUMBER}"
+          VERSION_CODE="$((58000 + GITHUB_RUN_NUMBER))"
+          VERSION_NAME="2.9.58"
 
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
 
           echo ""
           echo "=========================================="
-          echo "MY SHOP BUILD VERSION"
+          echo "MY SHOP V-58 VERSION"
+          echo "=========================================="
           echo "Version Name : $VERSION_NAME"
           echo "Version Code : $VERSION_CODE"
           echo "=========================================="
 
 
       # ============================================================
-      # 9. APPLY VERSION
+      # 9. APPLY VERSION ONLY TO APP MODULE
+      #
+      # Existing V57 source:
+      # versionCode 57
+      # versionName '2.9.57'
+      #
+      # This changes ONLY the app version.
+      # Dashboard/Login/features are not rewritten here.
       # ============================================================
-      - name: Apply generated app version
+      - name: Apply V58 app version
         shell: bash
         run: |
           set -euo pipefail
 
           ROOT="${{ steps.project.outputs.root }}"
 
-          mapfile -t gradle_files < <(
-            find "$ROOT" -type f \
-              \( -name "build.gradle" -o -name "build.gradle.kts" \) \
-              -print
-          )
-
-          if [ "${#gradle_files[@]}" -eq 0 ]; then
-            echo "ERROR: No Gradle build file found."
+          if [ -f "$ROOT/app/build.gradle" ]; then
+            BUILD_FILE="$ROOT/app/build.gradle"
+          elif [ -f "$ROOT/app/build.gradle.kts" ]; then
+            BUILD_FILE="$ROOT/app/build.gradle.kts"
+          else
+            echo "ERROR: app Gradle file not found."
             exit 1
           fi
 
+          echo "Version file:"
+          echo "$BUILD_FILE"
 
-          python3 - "$VERSION_CODE" "$VERSION_NAME" "${gradle_files[@]}" <<'PY'
+          python3 - "$BUILD_FILE" "$VERSION_CODE" "$VERSION_NAME" <<'PY'
           import re
           import sys
           from pathlib import Path
 
-          version_code = sys.argv[1]
-          version_name = sys.argv[2]
+          build_file = Path(sys.argv[1])
+          version_code = sys.argv[2]
+          version_name = sys.argv[3]
 
-          files = [
-              Path(value)
-              for value in sys.argv[3:]
-          ]
+          text = build_file.read_text(encoding="utf-8")
 
-          code_pattern = re.compile(
-              r'(\bversionCode\s*(?:=\s*)?)(\d+)'
-          )
+          # --------------------------------------------------------
+          # Groovy build.gradle
+          # --------------------------------------------------------
+          if build_file.name == "build.gradle":
 
-          name_pattern = re.compile(
-              r'(\bversionName\s*(?:=\s*)?)(["\'])(.*?)(\2)'
-          )
-
-          patched_code = False
-          patched_name = False
-
-          for path in files:
-
-              text = path.read_text(
-                  encoding="utf-8"
+              code_pattern = re.compile(
+                  r'(?m)^(\s*versionCode\s+)\d+\s*$'
               )
 
-              if (
-                  "com.android.application" not in text
-                  and "applicationId" not in text
-              ):
-                  continue
-
-              new_text = text
+              name_pattern = re.compile(
+                  r'(?m)^(\s*versionName\s+)[\'"][^\'"]*[\'"]\s*$'
+              )
 
               new_text, code_count = code_pattern.subn(
-                  lambda match:
-                  match.group(1) + version_code,
-                  new_text,
+                  lambda m: m.group(1) + version_code,
+                  text,
                   count=1
               )
 
               new_text, name_count = name_pattern.subn(
-                  lambda match:
-                  match.group(1)
-                  + match.group(2)
-                  + version_name
-                  + match.group(4),
+                  lambda m: m.group(1) + "'" + version_name + "'",
                   new_text,
                   count=1
               )
 
-              if code_count:
-                  patched_code = True
+          # --------------------------------------------------------
+          # Kotlin build.gradle.kts
+          # --------------------------------------------------------
+          else:
 
-              if name_count:
-                  patched_name = True
-
-              if new_text != text:
-                  path.write_text(
-                      new_text,
-                      encoding="utf-8"
-                  )
-
-
-          if not patched_code:
-              raise SystemExit(
-                  "ERROR: versionCode could not be updated."
+              code_pattern = re.compile(
+                  r'(?m)^(\s*versionCode\s*=\s*)\d+\s*$'
               )
 
-          if not patched_name:
-              raise SystemExit(
-                  "ERROR: versionName could not be updated."
+              name_pattern = re.compile(
+                  r'(?m)^(\s*versionName\s*=\s*)[\'"][^\'"]*[\'"]\s*$'
               )
 
+              new_text, code_count = code_pattern.subn(
+                  lambda m: m.group(1) + version_code,
+                  text,
+                  count=1
+              )
 
-          print(
-              "Version successfully applied:"
+              new_text, name_count = name_pattern.subn(
+                  lambda m: m.group(1) + '"' + version_name + '"',
+                  new_text,
+                  count=1
+              )
+
+          if code_count != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one versionCode. "
+                  f"Found {code_count}."
+              )
+
+          if name_count != 1:
+              raise SystemExit(
+                  "ERROR: Expected exactly one versionName. "
+                  f"Found {name_count}."
+              )
+
+          build_file.write_text(
+              new_text,
+              encoding="utf-8"
           )
 
-          print(
-              "versionName =",
-              version_name
-          )
-
-          print(
-              "versionCode =",
-              version_code
-          )
+          print("Version successfully updated.")
+          print("versionCode =", version_code)
+          print("versionName =", version_name)
           PY
 
+          echo ""
+          echo "===== FINAL VERSION ====="
+
+          grep -nE \
+            "versionCode|versionName" \
+            "$BUILD_FILE"
+
 
       # ============================================================
-      # 10. BUILD APK
+      # 10. VERIFY SOURCE CONTENT
       # ============================================================
-      - name: Build MY SHOP V58 APK
+      - name: Verify V57 fixed source and AccountStore
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="${{ steps.project.outputs.root }}"
+
+          ACCOUNT_STORE="$ROOT/app/src/main/java/com/myshop/app/AccountStore.java"
+
+          if [ ! -f "$ACCOUNT_STORE" ]; then
+            echo "ERROR: AccountStore.java not found."
+            exit 1
+          fi
+
+          echo "AccountStore:"
+          echo "$ACCOUNT_STORE"
+
+          echo ""
+          echo "===== SHA-256 SECTION ====="
+
+          grep -n -A18 -B5 \
+            "private static String sha256" \
+            "$ACCOUNT_STORE"
+
+          echo ""
+
+          if ! grep -q \
+            "catch (NoSuchAlgorithmException e)" \
+            "$ACCOUNT_STORE"; then
+
+            echo "ERROR: Expected NoSuchAlgorithmException handling not found."
+            exit 1
+          fi
+
+          if ! grep -q \
+            'MessageDigest.getInstance("SHA-256")' \
+            "$ACCOUNT_STORE"; then
+
+            echo "ERROR: SHA-256 implementation not found."
+            exit 1
+          fi
+
+          echo ""
+          echo "AccountStore exception handling: PASSED."
+
+
+      # ============================================================
+      # 11. CLEAN PROJECT
+      # ============================================================
+      - name: Clean project
         shell: bash
         run: |
           set -euo pipefail
 
           cd "${{ steps.project.outputs.root }}"
 
-          chmod +x gradlew
-
-          ./gradlew clean assembleRelease --stacktrace
+          ./gradlew clean \
+            --no-daemon \
+            --stacktrace
 
 
       # ============================================================
-      # 11. LOCATE EXACTLY ONE APK
+      # 12. BUILD RELEASE APK
       # ============================================================
-      - name: Locate exactly one APK
+      - name: Build MY SHOP V58 release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${{ steps.project.outputs.root }}"
+
+          ./gradlew \
+            assembleRelease \
+            --no-daemon \
+            --stacktrace
+
+
+      # ============================================================
+      # 13. LOCATE EXACTLY ONE RELEASE APK
+      # ============================================================
+      - name: Locate exactly one release APK
         id: apk
         shell: bash
         run: |
           set -euo pipefail
 
-          mapfile -t apks < <(
-            find "${{ steps.project.outputs.root }}" \
+          ROOT="${{ steps.project.outputs.root }}"
+
+          mapfile -t APKS < <(
+            find "$ROOT" \
               -type f \
               -path "*/build/outputs/apk/release/*.apk" \
               -name "*.apk" \
               -print | sort
           )
 
+          echo "===== RELEASE APK FILES ====="
 
-          echo "===== APK FILES ====="
+          if [ "${#APKS[@]}" -gt 0 ]; then
+            printf '%s\n' "${APKS[@]}"
+          else
+            echo "<none>"
+          fi
 
-          printf '%s\n' "${apks[@]:-<none>}"
+          echo ""
 
-
-          if [ "${#apks[@]}" -ne 1 ]; then
-            echo ""
+          if [ "${#APKS[@]}" -ne 1 ]; then
             echo "ERROR: Expected exactly ONE release APK."
-            echo "Found: ${#apks[@]}"
+            echo "Found: ${#APKS[@]}"
             exit 1
           fi
 
+          APK="${APKS[0]}"
 
-          echo ""
           echo "Selected APK:"
-          echo "${apks[0]}"
+          echo "$APK"
 
-
-          echo "path=${apks[0]}" >> "$GITHUB_OUTPUT"
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
 
 
       # ============================================================
-      # 12. VERIFY APK
+      # 14. VERIFY APK FILE
       # ============================================================
       - name: Verify APK
         shell: bash
@@ -524,11 +556,77 @@ jobs:
           unzip -t "$APK" >/dev/null
 
           echo ""
-          echo "APK verification PASSED."
+          echo "APK ZIP integrity: PASSED"
 
 
       # ============================================================
-      # 13. PREPARE VERIFIED RELEASE
+      # 15. VERIFY APK PACKAGE + VERSION
+      # ============================================================
+      - name: Verify APK package and version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="${{ steps.apk.outputs.path }}"
+
+          APKANALYZER="$(
+            find "$ANDROID_HOME" \
+              -type f \
+              -name "apkanalyzer" \
+              -print | head -1
+          )"
+
+          if [ -z "$APKANALYZER" ]; then
+            echo "ERROR: apkanalyzer not found."
+            exit 1
+          fi
+
+          echo "===== APPLICATION ID ====="
+
+          PACKAGE="$(
+            "$APKANALYZER" \
+              manifest application-id \
+              "$APK" | tail -1 | tr -d '\r'
+          )"
+
+          echo "Application ID:"
+          echo "$PACKAGE"
+
+          if [ "$PACKAGE" != "com.myshop.app" ]; then
+            echo "ERROR: Unexpected applicationId."
+            exit 1
+          fi
+
+          echo ""
+          echo "===== VERSION ====="
+
+          VERSION_OUTPUT="$(
+            "$APKANALYZER" \
+              manifest version \
+              "$APK"
+          )"
+
+          echo "$VERSION_OUTPUT"
+
+          if ! echo "$VERSION_OUTPUT" | grep -Fq "$VERSION_NAME"; then
+            echo "ERROR: APK versionName does not match V58."
+            echo "Expected:"
+            echo "$VERSION_NAME"
+            exit 1
+          fi
+
+          if echo "$VERSION_OUTPUT" | grep -Fq "2.9.57"; then
+            echo "ERROR: OLD V57 APK DETECTED."
+            exit 1
+          fi
+
+          echo ""
+          echo "APK package verification: PASSED"
+          echo "APK V58 version verification: PASSED"
+
+
+      # ============================================================
+      # 16. PREPARE VERIFIED RELEASE
       # ============================================================
       - name: Prepare verified release
         shell: bash
@@ -538,34 +636,38 @@ jobs:
           rm -rf release
           mkdir -p release
 
+          APK="${{ steps.apk.outputs.path }}"
 
-          cp "${{ steps.apk.outputs.path }}" \
-            "release/MY_SHOP_V58_${VERSION_NAME}.apk"
+          FINAL_APK="release/MY_SHOP_V58_${VERSION_NAME}.apk"
 
+          cp "$APK" "$FINAL_APK"
+
+          sha256sum "$FINAL_APK" \
+            > "${FINAL_APK}.sha256"
 
           cp "${{ steps.source.outputs.chosen }}" \
-            "release/MY_SHOP_V57_SOURCE_BACKUP_USED_FOR_V58.zip"
-
+            "release/MY_SHOP_V57_FIXED_SOURCE_USED_FOR_V58.zip"
 
           echo ""
-          echo "===== RELEASE FILES ====="
+          echo "===== VERIFIED RELEASE ====="
 
           ls -lh release/
 
 
       # ============================================================
-      # 14. UPLOAD VERIFIED APK
+      # 17. UPLOAD VERIFIED RELEASE
       # ============================================================
-      - name: Upload verified APK
+      - name: Upload verified V58 release
         uses: actions/upload-artifact@v4
         with:
           name: MY-SHOP-V58-VERIFIED
           path: release/
           if-no-files-found: error
+          retention-days: 30
 
 
       # ============================================================
-      # 15. COMPLETE
+      # 18. COMPLETE
       # ============================================================
       - name: Complete
         shell: bash
@@ -573,6 +675,8 @@ jobs:
           echo ""
           echo "=========================================="
           echo "MY SHOP V-58 BUILD COMPLETED"
+          echo "=========================================="
           echo "Version Name : ${VERSION_NAME}"
           echo "Version Code : ${VERSION_CODE}"
+          echo "Source       : ${SOURCE_ZIP}"
           echo "=========================================="
