@@ -1,4 +1,4 @@
-name: MY SHOP V-63 FINAL RELEASE APK
+name: MY SHOP VERSIONED FINAL RELEASE APK
 
 on:
   workflow_dispatch:
@@ -10,12 +10,11 @@ permissions:
   contents: read
 
 env:
-  SOURCE_ZIP: MY-SHOP-V62-FULL-FIX-SOURCE.zip
-  SOURCE_DIR: v63_source
+  SOURCE_DIR: current_source
 
 jobs:
   build:
-    name: MY SHOP V-63 - SINGLE VERIFIED RELEASE APK
+    name: MY SHOP - SINGLE VERIFIED VERSIONED RELEASE APK
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -23,7 +22,37 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify authoritative FULL-FIX source
+      - name: Select highest V-number source ZIP
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t candidates < <(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' -printf '%f\n' | while read -r f; do
+            if [[ "$f" =~ (^|[^0-9])V[-_[:space:]]*([0-9]+)([^0-9]|$) ]]; then
+              echo "${BASH_REMATCH[2]}|$f"
+            fi
+          done | sort -t'|' -k1,1n -k2,2)
+
+          if [ "${#candidates[@]}" -eq 0 ]; then
+            echo "::error::No versioned V-XX source ZIP found in repository root."
+            exit 1
+          fi
+
+          MAX_VERSION="${candidates[${#candidates[@]}-1]%%|*}"
+          mapfile -t latest < <(printf '%s\n' "${candidates[@]}" | awk -F'|' -v v="$MAX_VERSION" '$1 == v {print $2}')
+
+          if [ "${#latest[@]}" -ne 1 ]; then
+            echo "::error::Exactly ONE source ZIP is required for V-$MAX_VERSION; found ${#latest[@]}."
+            printf '%s\n' "${latest[@]}"
+            exit 1
+          fi
+
+          SOURCE_ZIP="${latest[0]}"
+          echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
+          echo "VERSION_NUMBER=$MAX_VERSION" >> "$GITHUB_ENV"
+          echo "Selected authoritative source: $SOURCE_ZIP"
+
+      - name: Verify selected source
         shell: bash
         run: |
           set -euo pipefail
@@ -31,9 +60,9 @@ jobs:
           unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)gradlew$'
           unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)settings\.gradle(\.kts)?$'
           unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)build\.gradle(\.kts)?$'
-          echo "AUTHORITATIVE SOURCE: $SOURCE_ZIP"
+          echo "VERIFIED SOURCE: $SOURCE_ZIP"
 
-      - name: Extract V-63 source
+      - name: Extract selected source
         shell: bash
         run: |
           set -euo pipefail
@@ -77,18 +106,18 @@ jobs:
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Generate unique V-63 version
+      - name: Generate unique version
         shell: bash
         run: |
           set -euo pipefail
-          VERSION_CODE="$((630000 + GITHUB_RUN_NUMBER))"
-          VERSION_NAME="2.9.63"
+          VERSION_CODE="$((VERSION_NUMBER * 10000 + GITHUB_RUN_NUMBER))"
+          VERSION_NAME="2.9.${VERSION_NUMBER}"
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
-          echo "V-63 VERSION_NAME=$VERSION_NAME"
-          echo "V-63 VERSION_CODE=$VERSION_CODE"
+          echo "MY SHOP V-$VERSION_NUMBER VERSION_NAME=$VERSION_NAME"
+          echo "MY SHOP V-$VERSION_NUMBER VERSION_CODE=$VERSION_CODE"
 
-      - name: Apply V-63 version
+      - name: Apply selected version
         shell: bash
         run: |
           set -euo pipefail
@@ -123,7 +152,7 @@ jobs:
           set -euo pipefail
           rm -rf "${{ steps.project.outputs.root }}/app/build/outputs/apk" release
 
-      - name: Build V-63 release APK
+      - name: Build exactly one release APK
         id: apk
         shell: bash
         run: |
@@ -143,35 +172,34 @@ jobs:
           fi
           echo "path=${apks[0]}" >> "$GITHUB_OUTPUT"
 
-      - name: Sign and verify V-63 APK
+      - name: Sign and verify APK
         id: signed
         shell: bash
         run: |
           set -euo pipefail
           UNSIGNED="${{ steps.apk.outputs.path }}"
           BT="$ANDROID_HOME/build-tools/35.0.0"
-          KEYSTORE="$RUNNER_TEMP/my-shop-v63-release.jks"
-          ALIGNED="$RUNNER_TEMP/my-shop-v63-aligned.apk"
-          SIGNED="$RUNNER_TEMP/MY_SHOP_V63_FINAL_RELEASE.apk"
+          KEYSTORE="$RUNNER_TEMP/my-shop-v${VERSION_NUMBER}-release.jks"
+          ALIGNED="$RUNNER_TEMP/my-shop-v${VERSION_NUMBER}-aligned.apk"
+          SIGNED="$RUNNER_TEMP/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.apk"
 
           keytool -genkeypair -v \
             -keystore "$KEYSTORE" \
             -storepass changeit \
             -keypass changeit \
-            -alias myshopv63 \
+            -alias "myshopv${VERSION_NUMBER}" \
             -keyalg RSA \
             -keysize 2048 \
             -validity 10000 \
-            -dname "CN=MY SHOP V63, OU=Release, O=MY SHOP, C=US" \
+            -dname "CN=MY SHOP V${VERSION_NUMBER}, OU=Release, O=MY SHOP, C=US" \
             >/dev/null 2>&1
 
           "$BT/zipalign" -f -p 4 "$UNSIGNED" "$ALIGNED"
-
           "$BT/apksigner" sign \
             --ks "$KEYSTORE" \
             --ks-pass pass:changeit \
             --key-pass pass:changeit \
-            --ks-key-alias myshopv63 \
+            --ks-key-alias "myshopv${VERSION_NUMBER}" \
             --v1-signing-enabled true \
             --v2-signing-enabled true \
             --v3-signing-enabled true \
@@ -179,7 +207,6 @@ jobs:
             "$ALIGNED"
 
           "$BT/apksigner" verify --verbose --min-sdk-version 23 "$SIGNED"
-
           BADGING="$("$BT/aapt2" dump badging "$SIGNED")"
           echo "$BADGING"
           echo "$BADGING" | grep -Fq "versionName='$VERSION_NAME'"
@@ -187,40 +214,40 @@ jobs:
           echo "$BADGING" | grep -Fq "package: name='com.myshop.app'"
 
           echo "signed_path=$SIGNED" >> "$GITHUB_OUTPUT"
-          echo "V-63 signature/version/applicationId verification PASSED"
+          echo "V-$VERSION_NUMBER signature/version/applicationId verification PASSED"
 
-      - name: Prepare ONE V-63 final APK
+      - name: Prepare ONE final APK
         shell: bash
         run: |
           set -euo pipefail
           rm -rf release
           mkdir -p release
-          cp "${{ steps.signed.outputs.signed_path }}" release/MY_SHOP_V63_FINAL_RELEASE.apk
-          sha256sum release/MY_SHOP_V63_FINAL_RELEASE.apk > release/MY_SHOP_V63_FINAL_RELEASE.sha256
+          cp "${{ steps.signed.outputs.signed_path }}" "release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.apk"
+          sha256sum "release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.apk" > "release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.sha256"
 
           APK_COUNT="$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')"
           test "$APK_COUNT" -eq 1
-          test -s release/MY_SHOP_V63_FINAL_RELEASE.apk
+          test -s "release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.apk"
 
-          echo "===== FINAL V-63 RELEASE ====="
+          echo "===== FINAL V-$VERSION_NUMBER RELEASE ====="
           ls -lh release
-          cat release/MY_SHOP_V63_FINAL_RELEASE.sha256
+          cat "release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.sha256"
 
-      - name: Upload ONE V-63 release
+      - name: Upload ONE final release
         uses: actions/upload-artifact@v4
         with:
-          name: MY-SHOP-V63-FINAL-RELEASE
+          name: MY-SHOP-V${{ env.VERSION_NUMBER }}-FINAL-RELEASE
           path: |
-            release/MY_SHOP_V63_FINAL_RELEASE.apk
-            release/MY_SHOP_V63_FINAL_RELEASE.sha256
+            release/MY_SHOP_V${{ env.VERSION_NUMBER }}_FINAL_RELEASE.apk
+            release/MY_SHOP_V${{ env.VERSION_NUMBER }}_FINAL_RELEASE.sha256
           if-no-files-found: error
           retention-days: 30
 
-      - name: Final V-63 success guard
+      - name: Final success guard
         shell: bash
         run: |
           set -euo pipefail
           test "$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')" -eq 1
-          test -s release/MY_SHOP_V63_FINAL_RELEASE.apk
-          test -s release/MY_SHOP_V63_FINAL_RELEASE.sha256
-          echo "MY SHOP V-63 FINAL RELEASE: ONE VERIFIED APK READY"
+          test -s "release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.apk"
+          test -s "release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.sha256"
+          echo "MY SHOP V-$VERSION_NUMBER FINAL RELEASE: ONE VERIFIED APK READY"
