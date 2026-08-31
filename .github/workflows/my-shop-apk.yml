@@ -1,4 +1,4 @@
-name: MY SHOP V-62 FINAL RELEASE APK
+name: MY SHOP V-63 FINAL RELEASE APK
 
 on:
   workflow_dispatch:
@@ -10,12 +10,12 @@ permissions:
   contents: read
 
 env:
-  SOURCE_ZIP: MY-SHOP-V62-REAL-FIX-BACKEND-READY.zip
-  SOURCE_DIR: v62_source
+  SOURCE_ZIP: MY-SHOP-V62-FULL-FIX-SOURCE.zip
+  SOURCE_DIR: v63_source
 
 jobs:
   build:
-    name: MY SHOP V-62 - SINGLE VERIFIED RELEASE APK
+    name: MY SHOP V-63 - SINGLE VERIFIED RELEASE APK
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
@@ -23,33 +23,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify V-62 source
+      - name: Verify authoritative FULL-FIX source
         shell: bash
         run: |
           set -euo pipefail
-          test -f "$SOURCE_ZIP" || {
-            echo "::error::Missing V-62 source: $SOURCE_ZIP"
-            exit 1
-          }
-
-          unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)gradlew$' || {
-            echo "::error::V-62 source missing gradlew"
-            exit 1
-          }
-
-          unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)settings\.gradle(\.kts)?$' || {
-            echo "::error::V-62 source missing settings.gradle(.kts)"
-            exit 1
-          }
-
-          unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)build\.gradle(\.kts)?$' || {
-            echo "::error::V-62 source missing build.gradle(.kts)"
-            exit 1
-          }
-
+          test -f "$SOURCE_ZIP"
+          unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)gradlew$'
+          unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)settings\.gradle(\.kts)?$'
+          unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)build\.gradle(\.kts)?$'
           echo "AUTHORITATIVE SOURCE: $SOURCE_ZIP"
 
-      - name: Extract V-62 source
+      - name: Extract V-63 source
         shell: bash
         run: |
           set -euo pipefail
@@ -62,24 +46,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           mapfile -t settings_files < <(
-            find "$SOURCE_DIR" -type f \
-              \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
-              -print | sort
+            find "$SOURCE_DIR" -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -print | sort
           )
-
           if [ "${#settings_files[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly ONE Android project. Found ${#settings_files[@]}."
+            echo "::error::Expected exactly ONE Android project; found ${#settings_files[@]}."
             printf '%s\n' "${settings_files[@]:-<none>}"
             exit 1
           fi
-
           ROOT="$(dirname "${settings_files[0]}")"
-
           test -f "$ROOT/gradlew"
           test -f "$ROOT/build.gradle" || test -f "$ROOT/build.gradle.kts"
-
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "ANDROID PROJECT: $ROOT"
 
@@ -98,278 +75,152 @@ jobs:
         run: |
           set -euo pipefail
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Generate V-62 version
+      - name: Generate unique V-63 version
         shell: bash
         run: |
           set -euo pipefail
-
-          VERSION_CODE="$((620000 + GITHUB_RUN_NUMBER))"
-          VERSION_NAME="2.9.62"
-
+          VERSION_CODE="$((630000 + GITHUB_RUN_NUMBER))"
+          VERSION_NAME="2.9.63"
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "V-63 VERSION_NAME=$VERSION_NAME"
+          echo "V-63 VERSION_CODE=$VERSION_CODE"
 
-          echo "V-62 VERSION_NAME=$VERSION_NAME"
-          echo "V-62 VERSION_CODE=$VERSION_CODE"
-
-      - name: Apply V-62 version
+      - name: Apply V-63 version
         shell: bash
         run: |
           set -euo pipefail
-
           ROOT="${{ steps.project.outputs.root }}"
-
-          mapfile -t gradle_files < <(
-            find "$ROOT" -type f \
-              \( -name 'build.gradle' -o -name 'build.gradle.kts' \) \
-              -print | sort
-          )
-
+          mapfile -t gradle_files < <(find "$ROOT" -type f \( -name 'build.gradle' -o -name 'build.gradle.kts' \) -print | sort)
           python3 - "$VERSION_CODE" "$VERSION_NAME" "${gradle_files[@]}" <<'PY'
-          import re
-          import sys
+          import re, sys
           from pathlib import Path
-
-          version_code = sys.argv[1]
-          version_name = sys.argv[2]
+          code, name = sys.argv[1], sys.argv[2]
           files = [Path(x) for x in sys.argv[3:]]
-
           code_re = re.compile(r'(\bversionCode\s*(?:=\s*)?)\d+')
           name_re = re.compile(r'(\bversionName\s*(?:=\s*)?)(["\'])(.*?)(\2)')
-
-          patched_code = False
-          patched_name = False
-
-          for path in files:
-              text = path.read_text(encoding="utf-8")
-
-              if "com.android.application" not in text and "applicationId" not in text:
+          changed_code = changed_name = False
+          for p in files:
+              text = p.read_text(encoding='utf-8')
+              if 'com.android.application' not in text and 'applicationId' not in text:
                   continue
-
-              new, n1 = code_re.subn(
-                  r'\g<1>' + version_code,
-                  text,
-                  count=1
-              )
-
-              new, n2 = name_re.subn(
-                  r'\g<1>\g<2>' + version_name + r'\g<4>',
-                  new,
-                  count=1
-              )
-
-              if n1:
-                  patched_code = True
-
-              if n2:
-                  patched_name = True
-
+              new, n1 = code_re.subn(r'\g<1>'+code, text, count=1)
+              new, n2 = name_re.subn(r'\g<1>\g<2>'+name+r'\g<4>', new, count=1)
+              changed_code |= bool(n1)
+              changed_name |= bool(n2)
               if new != text:
-                  path.write_text(new, encoding="utf-8")
-
-          if not patched_code or not patched_name:
-              raise SystemExit(
-                  "ERROR: V-62 versionCode/versionName could not be updated."
-              )
-
-          print(
-              f"Applied versionName={version_name}, "
-              f"versionCode={version_code}"
-          )
+                  p.write_text(new, encoding='utf-8')
+          if not changed_code or not changed_name:
+              raise SystemExit('ERROR: Could not update versionCode and versionName.')
+          print(f'Applied versionName={name}, versionCode={code}')
           PY
 
-      - name: Clean previous APK outputs
+      - name: Clean build outputs
         shell: bash
         run: |
           set -euo pipefail
-          ROOT="${{ steps.project.outputs.root }}"
-          rm -rf "$ROOT/app/build/outputs/apk"
-          rm -rf release
+          rm -rf "${{ steps.project.outputs.root }}/app/build/outputs/apk" release
 
-      - name: Build V-62 release APK
+      - name: Build V-63 release APK
         id: apk
         shell: bash
         run: |
           set -euo pipefail
-
           ROOT="${{ steps.project.outputs.root }}"
           cd "$ROOT"
-
           chmod +x gradlew
+          ./gradlew clean assembleRelease --no-daemon --no-build-cache --rerun-tasks --stacktrace
 
-          ./gradlew clean assembleRelease \
-            --no-daemon \
-            --no-build-cache \
-            --rerun-tasks \
-            --stacktrace
-
-          # IMPORTANT:
-          # The V-62 source can use a nested/temporary project root. After
-          # Gradle assembleRelease, do NOT depend on the earlier ROOT path.
-          # Search the complete GitHub workspace for the real release APK.
-          mapfile -t apks < <(
-            find "$GITHUB_WORKSPACE" -type f \
-              -path '*/build/outputs/apk/release/*.apk' \
-              -name '*.apk' \
-              -print 2>/dev/null | sort
-          )
-
-          echo "Release APK files found in workspace:"
-          if [ "${#apks[@]}" -gt 0 ]; then
-            printf '%s\n' "${apks[@]}"
-          else
-            echo "<none>"
-          fi
-
+          mapfile -t apks < <(find "$GITHUB_WORKSPACE" -type f -path '*/build/outputs/apk/release/*.apk' -name '*.apk' -print 2>/dev/null | sort)
+          echo "Release APK files found:"
+          printf '%s\n' "${apks[@]:-<none>}"
           if [ "${#apks[@]}" -ne 1 ]; then
-            echo "::error::V-62 requires exactly ONE release APK."
-            echo "APK count=${#apks[@]}"
-            echo "Searching for any APK produced by Gradle:"
+            echo "::error::Exactly ONE release APK required; found ${#apks[@]}."
             find "$GITHUB_WORKSPACE" -type f -name '*.apk' -print 2>/dev/null | sort || true
             exit 1
           fi
-
-          echo "Verified release APK: ${apks[0]}"
           echo "path=${apks[0]}" >> "$GITHUB_OUTPUT"
 
-      - name: Confirm V-62 APK exists before signing
-        shell: bash
-        run: |
-          set -euo pipefail
-          APK="${{ steps.apk.outputs.path }}"
-          test -f "$APK"
-          test -s "$APK"
-          echo "READY FOR SIGNING: $APK"
-          ls -lh "$APK"
-
-      - name: Sign and verify V-62 APK
+      - name: Sign and verify V-63 APK
         id: signed
         shell: bash
         run: |
           set -euo pipefail
-
           UNSIGNED="${{ steps.apk.outputs.path }}"
-          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-
-          APKSIGNER="$BUILD_TOOLS/apksigner"
-          ZIPALIGN="$BUILD_TOOLS/zipalign"
-          AAPT2="$BUILD_TOOLS/aapt2"
-
-          KEYSTORE="$RUNNER_TEMP/my-shop-v62-release.jks"
-          ALIGNED="$RUNNER_TEMP/my-shop-v62-aligned.apk"
-          SIGNED="$RUNNER_TEMP/MY_SHOP_V62_FINAL_RELEASE.apk"
-
-          test -s "$UNSIGNED"
-          test -x "$APKSIGNER"
-          test -x "$ZIPALIGN"
-          test -x "$AAPT2"
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          KEYSTORE="$RUNNER_TEMP/my-shop-v63-release.jks"
+          ALIGNED="$RUNNER_TEMP/my-shop-v63-aligned.apk"
+          SIGNED="$RUNNER_TEMP/MY_SHOP_V63_FINAL_RELEASE.apk"
 
           keytool -genkeypair -v \
             -keystore "$KEYSTORE" \
             -storepass changeit \
             -keypass changeit \
-            -alias myshopv62 \
+            -alias myshopv63 \
             -keyalg RSA \
             -keysize 2048 \
             -validity 10000 \
-            -dname "CN=MY SHOP V62, OU=Release, O=MY SHOP, C=US" \
+            -dname "CN=MY SHOP V63, OU=Release, O=MY SHOP, C=US" \
             >/dev/null 2>&1
 
-          "$ZIPALIGN" -f -p 4 "$UNSIGNED" "$ALIGNED"
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" "$ALIGNED"
 
-          "$APKSIGNER" sign \
+          "$BT/apksigner" sign \
             --ks "$KEYSTORE" \
             --ks-pass pass:changeit \
             --key-pass pass:changeit \
-            --ks-key-alias myshopv62 \
+            --ks-key-alias myshopv63 \
             --v1-signing-enabled true \
             --v2-signing-enabled true \
             --v3-signing-enabled true \
             --out "$SIGNED" \
             "$ALIGNED"
 
-          "$APKSIGNER" verify --verbose --min-sdk-version 23 "$SIGNED"
+          "$BT/apksigner" verify --verbose --min-sdk-version 23 "$SIGNED"
 
-          BADGING="$("$AAPT2" dump badging "$SIGNED")"
+          BADGING="$("$BT/aapt2" dump badging "$SIGNED")"
           echo "$BADGING"
-
-          echo "$BADGING" | grep -Fq "versionName='$VERSION_NAME'" || {
-            echo "::error::V-62 versionName mismatch"
-            exit 1
-          }
-
-          echo "$BADGING" | grep -Fq "versionCode='$VERSION_CODE'" || {
-            echo "::error::V-62 versionCode mismatch"
-            exit 1
-          }
-
-          echo "$BADGING" | grep -Fq "package: name='com.myshop.app'" || {
-            echo "::error::Unexpected applicationId"
-            exit 1
-          }
+          echo "$BADGING" | grep -Fq "versionName='$VERSION_NAME'"
+          echo "$BADGING" | grep -Fq "versionCode='$VERSION_CODE'"
+          echo "$BADGING" | grep -Fq "package: name='com.myshop.app'"
 
           echo "signed_path=$SIGNED" >> "$GITHUB_OUTPUT"
+          echo "V-63 signature/version/applicationId verification PASSED"
 
-          echo "V-62 APK SIGNATURE + VERSION + APPLICATION ID: PASS"
-
-      - name: Prepare ONE final V-62 APK
+      - name: Prepare ONE V-63 final APK
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf release
           mkdir -p release
+          cp "${{ steps.signed.outputs.signed_path }}" release/MY_SHOP_V63_FINAL_RELEASE.apk
+          sha256sum release/MY_SHOP_V63_FINAL_RELEASE.apk > release/MY_SHOP_V63_FINAL_RELEASE.sha256
 
-          FINAL="release/MY_SHOP_V62_FINAL_RELEASE.apk"
+          APK_COUNT="$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')"
+          test "$APK_COUNT" -eq 1
+          test -s release/MY_SHOP_V63_FINAL_RELEASE.apk
 
-          cp "${{ steps.signed.outputs.signed_path }}" "$FINAL"
-
-          test -s "$FINAL"
-
-          sha256sum "$FINAL" > release/MY_SHOP_V62_FINAL_RELEASE.sha256
-
-          APK_COUNT="$(
-            find release -maxdepth 1 -type f -name '*.apk' |
-            wc -l |
-            tr -d ' '
-          )"
-
-          if [ "$APK_COUNT" -ne 1 ]; then
-            echo "::error::Final release must contain exactly ONE APK."
-            exit 1
-          fi
-
+          echo "===== FINAL V-63 RELEASE ====="
           ls -lh release
-          cat release/MY_SHOP_V62_FINAL_RELEASE.sha256
+          cat release/MY_SHOP_V63_FINAL_RELEASE.sha256
 
-      - name: Upload ONE V-62 release
+      - name: Upload ONE V-63 release
         uses: actions/upload-artifact@v4
         with:
-          name: MY-SHOP-V62-FINAL-RELEASE
+          name: MY-SHOP-V63-FINAL-RELEASE
           path: |
-            release/MY_SHOP_V62_FINAL_RELEASE.apk
-            release/MY_SHOP_V62_FINAL_RELEASE.sha256
+            release/MY_SHOP_V63_FINAL_RELEASE.apk
+            release/MY_SHOP_V63_FINAL_RELEASE.sha256
           if-no-files-found: error
           retention-days: 30
 
-      - name: Final V-62 success guard
+      - name: Final V-63 success guard
         shell: bash
         run: |
           set -euo pipefail
-
-          APK_COUNT="$(
-            find release -maxdepth 1 -type f -name '*.apk' |
-            wc -l |
-            tr -d ' '
-          )"
-
-          test "$APK_COUNT" -eq 1
-          test -s release/MY_SHOP_V62_FINAL_RELEASE.apk
-          test -s release/MY_SHOP_V62_FINAL_RELEASE.sha256
-
-          echo "MY SHOP V-62 FINAL RELEASE: PASS"
+          test "$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')" -eq 1
+          test -s release/MY_SHOP_V63_FINAL_RELEASE.apk
+          test -s release/MY_SHOP_V63_FINAL_RELEASE.sha256
+          echo "MY SHOP V-63 FINAL RELEASE: ONE VERIFIED APK READY"
