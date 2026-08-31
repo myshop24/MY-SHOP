@@ -22,6 +22,7 @@ jobs:
     timeout-minutes: 45
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -77,6 +78,28 @@ jobs:
 
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "app_gradle=$APP_GRADLE" >> "$GITHUB_OUTPUT"
+
+      - name: Remove invalid dashboard reference resource
+        working-directory: ${{ steps.project.outputs.root }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REFERENCE_FILE="app/src/main/res/drawable/myshop_dashboard_reference.png"
+
+          if [ -f "$REFERENCE_FILE" ]; then
+            echo "Removing non-build dashboard reference resource:"
+            echo "$REFERENCE_FILE"
+
+            rm -f "$REFERENCE_FILE"
+          fi
+
+          if [ -e "$REFERENCE_FILE" ]; then
+            echo "::error::Dashboard reference resource could not be removed."
+            exit 1
+          fi
+
+          echo "Dashboard reference resource check passed."
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -275,7 +298,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: MY-SHOP-V-78-FINAL-APK
-          path: release/MY_SHOP_V-78_FINAL.apk
+          path: |
+            release/MY_SHOP_V-78_FINAL.apk
           if-no-files-found: error
           retention-days: 30
 
@@ -294,8 +318,5 @@ jobs:
           test "$COUNT" -eq 1
           test -s "release/MY_SHOP_V-78_FINAL.apk"
 
-          echo "======================================"
           echo "FINAL V-78 CHECK PASSED"
           echo "Exactly ONE APK exists."
-          echo "MY_SHOP_V-78_FINAL.apk"
-          echo "======================================"
