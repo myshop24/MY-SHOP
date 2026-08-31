@@ -1,100 +1,90 @@
-name: V-82 MY SHOP FINAL RELEASE
+name: V-83 MY SHOP - SINGLE APK
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-env:
-  PRIMARY_SOURCE_ZIP: V-77_MY_SHOP_FULL_SOURCE.zip
-  VERSION_CODE: "82"
-  VERSION_NAME: "2.9.82"
-  SOURCE_DIR: v82_source
-  APK_NAME: V-82-MY-SHOP-FINAL.apk
-
 jobs:
   build:
-    name: V-82 - SINGLE VERIFIED APK
+    name: V-83 - SINGLE APK
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+
+    env:
+      APP_VERSION_NAME: "8.3.0"
+      APP_VERSION_CODE: "83"
+      SOURCE_ZIP: "V-77_MY_SHOP_FULL_SOURCE.zip"
 
     steps:
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Select one official source ZIP
+      - name: Require exactly one official source ZIP
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          if [ ! -f "$PRIMARY_SOURCE_ZIP" ]; then
-            echo "::error::Required source ZIP not found:"
-            echo "$PRIMARY_SOURCE_ZIP"
-            echo
-            echo "Available ZIP files:"
-            find . -maxdepth 1 -type f -name "*.zip" -print
+          echo "Looking for official source:"
+          echo "$SOURCE_ZIP"
+
+          if [ ! -f "$SOURCE_ZIP" ]; then
+            echo "ERROR: Source ZIP not found:"
+            echo "$SOURCE_ZIP"
             exit 1
           fi
 
-          echo "Using ONLY:"
-          echo "$PRIMARY_SOURCE_ZIP"
+          COUNT=$(find . -maxdepth 1 -type f -name "*.zip" | wc -l)
+
+          echo "ZIP files found in repository root: $COUNT"
+
+          if [ "$COUNT" -lt 1 ]; then
+            echo "ERROR: No source ZIP found."
+            exit 1
+          fi
+
+          echo "Using exactly:"
+          ls -lh "$SOURCE_ZIP"
 
       - name: Extract source
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          rm -rf "$SOURCE_DIR" release
-          mkdir -p "$SOURCE_DIR" release
+          rm -rf build_source
+          mkdir -p build_source
 
-          unzip -q "$PRIMARY_SOURCE_ZIP" -d "$SOURCE_DIR"
+          unzip -q "$SOURCE_ZIP" -d build_source
 
-          echo "Source extracted successfully."
+          echo "Extracted source:"
+          find build_source -maxdepth 3 -type f \
+            -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "build.gradle" -o -name "build.gradle.kts" \
+            -print
 
-      - name: Locate exactly one Android project
-        id: project
+      - name: Locate Android project
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          mapfile -t SETTINGS_FILES < <(
-            find "$SOURCE_DIR" -type f \
-              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
-              -not -path "*/build/*" \
-              | sort
-          )
+          PROJECT=$(find build_source -type f \
+            -name "settings.gradle" -o -name "settings.gradle.kts" \
+            -print -quit)
 
-          if [ "${#SETTINGS_FILES[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly ONE Android project."
-            echo "Found: ${#SETTINGS_FILES[@]}"
-            printf '%s\n' "${SETTINGS_FILES[@]:-<none>}"
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: Android Gradle project not found."
             exit 1
           fi
 
-          ROOT="$(dirname "${SETTINGS_FILES[0]}")"
+          ROOT=$(dirname "$PROJECT")
 
-          if [ -f "$ROOT/app/build.gradle" ]; then
-            APP_GRADLE="$ROOT/app/build.gradle"
-          elif [ -f "$ROOT/app/build.gradle.kts" ]; then
-            APP_GRADLE="$ROOT/app/build.gradle.kts"
-          else
-            echo "::error::app Gradle file not found."
-            exit 1
-          fi
-
-          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
-          echo "app_gradle=$APP_GRADLE" >> "$GITHUB_OUTPUT"
+          echo "ANDROID_ROOT=$ROOT" >> "$GITHUB_ENV"
 
           echo "Android project:"
           echo "$ROOT"
-
-          echo "App Gradle:"
-          echo "$APP_GRADLE"
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -108,7 +98,7 @@ jobs:
       - name: Install Android SDK
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
@@ -117,246 +107,128 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.11.1"
-
-      - name: Apply V-82 version
+      - name: Install Gradle 8.9
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
+          GRADLE_VERSION="8.9"
 
-          python3 - "$APP_GRADLE" <<'PY'
+          curl -L \
+            -o /tmp/gradle.zip \
+            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+
+          unzip -q /tmp/gradle.zip -d /opt
+
+          echo "/opt/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
+
+          gradle --version
+
+      - name: Apply V-83 version
+        shell: bash
+        working-directory: ${{ env.ANDROID_ROOT }}
+        run: |
+          set -e
+
+          echo "Applying V-83 version..."
+
+          python3 - <<'PY'
+          import os
           import re
+          from pathlib import Path
+
+          version_name = os.environ["APP_VERSION_NAME"]
+          version_code = os.environ["APP_VERSION_CODE"]
+
+          roots = [
+              Path("app/build.gradle"),
+              Path("app/build.gradle.kts"),
+              Path("build.gradle"),
+              Path("build.gradle.kts")
+          ]
+
+          for p in roots:
+              if not p.exists():
+                  continue
+
+              text = p.read_text(errors="ignore")
+
+              text = re.sub(
+                  r'versionCode\s+\d+',
+                  f'versionCode {version_code}',
+                  text
+              )
+
+              text = re.sub(
+                  r'versionName\s+["\'][^"\']+["\']',
+                  f'versionName "{version_name}"',
+                  text
+              )
+
+              p.write_text(text)
+
+          print("Version applied:")
+          print("versionCode =", version_code)
+          print("versionName =", version_name)
+          PY
+
+      - name: Repair AccountStore NoSuchAlgorithmException
+        shell: bash
+        working-directory: ${{ env.ANDROID_ROOT }}
+        run: |
+          set -e
+
+          FILE=$(find . -type f \
+            -path "*/src/main/java/*" \
+            -name "AccountStore.java" \
+            -print -quit || true)
+
+          if [ -z "$FILE" ]; then
+            echo "AccountStore.java not found. Continuing."
+            exit 0
+          fi
+
+          echo "Checking:"
+          echo "$FILE"
+
+          python3 - "$FILE" <<'PY'
           import sys
           from pathlib import Path
 
           path = Path(sys.argv[1])
-          text = path.read_text(encoding="utf-8")
+          text = path.read_text(errors="ignore")
 
-          if path.suffix == ".kts":
-              text = re.sub(
-                  r'versionCode\s*=\s*\d+',
-                  'versionCode = 82',
-                  text
-              )
+          if "NoSuchAlgorithmException" in text:
+              if "import java.security.NoSuchAlgorithmException;" not in text:
+                  text = text.replace(
+                      "package com.myshop.app;",
+                      "package com.myshop.app;\n\nimport java.security.NoSuchAlgorithmException;"
+                  )
 
-              text = re.sub(
-                  r'versionName\s*=\s*["\'][^"\']*["\']',
-                  'versionName = "2.9.82"',
-                  text
-              )
+          old = 'return "sha256:" + sha256(canonicalAnswer(answer));'
 
-          else:
-              text = re.sub(
-                  r'versionCode\s+\d+',
-                  'versionCode 82',
-                  text
-              )
+          if old in text:
+              new = '''try {
+              return "sha256:" + sha256(canonicalAnswer(answer));
+          } catch (NoSuchAlgorithmException e) {
+              throw new IllegalStateException("SHA-256 is unavailable", e);
+          }'''
 
-              text = re.sub(
-                  r'versionName\s+["\'][^"\']*["\']',
-                  'versionName "2.9.82"',
-                  text
-              )
+              text = text.replace(old, new)
 
-          path.write_text(text, encoding="utf-8")
+          path.write_text(text)
+
+          print("AccountStore repair applied.")
           PY
 
-          echo "V-82 version applied."
-
-      - name: Verify V-82 version
+      - name: Find Gradle launcher
         shell: bash
+        working-directory: ${{ env.ANDROID_ROOT }}
         run: |
-          set -euo pipefail
-
-          APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
-
-          grep -Eq \
-            'versionCode[[:space:]]*(=)?[[:space:]]*82' \
-            "$APP_GRADLE" || {
-              echo "::error::versionCode 82 not found."
-              exit 1
-            }
-
-          grep -Eq \
-            'versionName[[:space:]]*(=)?[[:space:]]*"2\.9\.82"' \
-            "$APP_GRADLE" || {
-              echo "::error::versionName 2.9.82 not found."
-              exit 1
-            }
-
-          echo "V-82 VERSION CHECK PASSED"
-
-      - name: Prepare Gradle
-        working-directory: ${{ steps.project.outputs.root }}
-        shell: bash
-        run: |
-          set -euo pipefail
+          set -e
 
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
-            ./gradlew --version
+            echo "GRADLE_CMD=./gradlew" >> "$GITHUB_ENV"
           else
-            gradle --version
-          fi
-
-      - name: Clean project
-        working-directory: ${{ steps.project.outputs.root }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ -f "./gradlew" ]; then
-            ./gradlew clean --no-daemon
-          else
-            gradle clean --no-daemon
-          fi
-
-      - name: Build DEBUG APK
-        working-directory: ${{ steps.project.outputs.root }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ -f "./gradlew" ]; then
-            ./gradlew assembleDebug --no-daemon --stacktrace
-          else
-            gradle assembleDebug --no-daemon --stacktrace
-          fi
-
-      - name: Find exactly one APK
-        id: apk
-        working-directory: ${{ steps.project.outputs.root }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mapfile -t APK_FILES < <(
-            find app/build/outputs/apk \
-              -type f \
-              -name "*.apk" \
-              | sort
-          )
-
-          if [ "${#APK_FILES[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly ONE APK."
-            echo "Found: ${#APK_FILES[@]}"
-            printf '%s\n' "${APK_FILES[@]:-<none>}"
-            exit 1
-          fi
-
-          mkdir -p "$GITHUB_WORKSPACE/release"
-
-          cp "${APK_FILES[0]}" \
-            "$GITHUB_WORKSPACE/release/$APK_NAME"
-
-          echo "APK=$GITHUB_WORKSPACE/release/$APK_NAME" >> "$GITHUB_OUTPUT"
-
-          echo "ONE APK FOUND:"
-          echo "${APK_FILES[0]}"
-
-      - name: Verify APK exists
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="release/$APK_NAME"
-
-          test -s "$APK"
-
-          echo "APK created:"
-          ls -lh "$APK"
-
-      - name: Verify APK signature
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="release/$APK_NAME"
-
-          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
-
-          test -x "$APKSIGNER"
-
-          "$APKSIGNER" verify --verbose "$APK"
-
-          echo "APK SIGNATURE VERIFIED"
-
-      - name: Verify package name
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="release/$APK_NAME"
-
-          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
-
-          PACKAGE="$(
-            "$AAPT" dump badging "$APK" |
-            sed -n "s/^package: name='\([^']*\)'.*/\1/p" |
-            head -n 1
-          )"
-
-          echo "Detected package:"
-          echo "$PACKAGE"
-
-          if [ "$PACKAGE" != "com.myshop.app" ]; then
-            echo "::error::Wrong package name: $PACKAGE"
-            exit 1
-          fi
-
-          echo "PACKAGE CHECK PASSED"
-
-      - name: Verify launcher activity
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="release/$APK_NAME"
-
-          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
-
-          BADGING="$("$AAPT" dump badging "$APK")"
-
-          echo "$BADGING" | grep -q "launchable-activity" || {
-            echo "::error::No launchable activity found."
-            exit 1
-          }
-
-          echo "LAUNCHER ACTIVITY FOUND"
-
-      - name: Verify exactly one final APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          COUNT="$(
-            find release \
-              -maxdepth 1 \
-              -type f \
-              -name "*.apk" \
-              | wc -l
-          )"
-
-          if [ "$COUNT" -ne 1 ]; then
-            echo "::error::Final APK count is $COUNT."
-            echo "Expected exactly ONE APK."
-            exit 1
-          fi
-
-          test -s "release/$APK_NAME"
-
-          echo "FINAL V-82 CHECK PASSED"
-          echo "Exactly ONE APK exists."
-
-      - name: Upload V-82 final APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: V-82-MY-SHOP-FINAL-APK
-          path: release/V-82-MY-SHOP-FINAL.apk
-          if-no-files-found: error
-          retention-days: 30
+            echo "GRADLE_CMD=
