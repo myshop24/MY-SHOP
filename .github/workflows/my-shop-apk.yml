@@ -1,17 +1,17 @@
-name: V-83 MY SHOP - SINGLE APK
+name: V-83 MY SHOP - SINGLE VERIFIED APK
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: V-83 - SINGLE APK
+    name: V-83 - SINGLE VERIFIED APK
     runs-on: ubuntu-latest
 
     env:
@@ -24,67 +24,78 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Require exactly one official source ZIP
+      - name: Select official source ZIP
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "Looking for official source:"
-          echo "$SOURCE_ZIP"
+          echo "Checking official source ZIP..."
 
           if [ ! -f "$SOURCE_ZIP" ]; then
-            echo "ERROR: Source ZIP not found:"
+            echo "ERROR: Official source ZIP not found:"
             echo "$SOURCE_ZIP"
             exit 1
           fi
 
-          COUNT=$(find . -maxdepth 1 -type f -name "*.zip" | wc -l)
-
-          echo "ZIP files found in repository root: $COUNT"
-
-          if [ "$COUNT" -lt 1 ]; then
-            echo "ERROR: No source ZIP found."
-            exit 1
-          fi
-
-          echo "Using exactly:"
+          echo "Official source:"
           ls -lh "$SOURCE_ZIP"
+
+          echo "Source ZIP selected successfully."
 
       - name: Extract source
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          rm -rf build_source
-          mkdir -p build_source
+          rm -rf "$GITHUB_WORKSPACE/build_source"
+          mkdir -p "$GITHUB_WORKSPACE/build_source"
 
-          unzip -q "$SOURCE_ZIP" -d build_source
+          unzip -q "$SOURCE_ZIP" -d "$GITHUB_WORKSPACE/build_source"
 
-          echo "Extracted source:"
-          find build_source -maxdepth 3 -type f \
-            -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "build.gradle" -o -name "build.gradle.kts" \
+          echo "Source extracted."
+
+          find "$GITHUB_WORKSPACE/build_source" \
+            -type f \
+            \
+              -name "settings.gradle" \
+              -o -name "settings.gradle.kts" \
+              -o -name "build.gradle" \
+              -o -name "build.gradle.kts" \
+            \
             -print
 
-      - name: Locate Android project
+      - name: Locate exactly one Android project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          PROJECT=$(find build_source -type f \
-            -name "settings.gradle" -o -name "settings.gradle.kts" \
-            -print -quit)
+          mapfile -t PROJECTS < <(
+            find "$GITHUB_WORKSPACE/build_source" \
+              -type f \
+              \
+                -name "settings.gradle" \
+                -o -name "settings.gradle.kts" \
+              \
+              -print
+          )
 
-          if [ -z "$PROJECT" ]; then
-            echo "ERROR: Android Gradle project not found."
+          COUNT="${#PROJECTS[@]}"
+
+          echo "Android projects found: $COUNT"
+
+          if [ "$COUNT" -ne 1 ]; then
+            echo "ERROR: Expected exactly ONE Android project."
+            printf '%s\n' "${PROJECTS[@]}"
             exit 1
           fi
 
-          ROOT=$(dirname "$PROJECT")
+          PROJECT="${PROJECTS[0]}"
+          ANDROID_ROOT="$(dirname "$PROJECT")"
 
-          echo "ANDROID_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_ROOT=$ANDROID_ROOT" >> "$GITHUB_ENV"
 
           echo "Android project:"
-          echo "$ROOT"
+          echo "$ANDROID_ROOT"
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -98,7 +109,7 @@ jobs:
       - name: Install Android SDK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
@@ -110,13 +121,15 @@ jobs:
       - name: Install Gradle 8.9
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           GRADLE_VERSION="8.9"
 
-          curl -L \
+          curl -fL \
             -o /tmp/gradle.zip \
             "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+
+          rm -rf "/opt/gradle-${GRADLE_VERSION}"
 
           unzip -q /tmp/gradle.zip -d /opt
 
@@ -128,11 +141,9 @@ jobs:
         shell: bash
         working-directory: ${{ env.ANDROID_ROOT }}
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "Applying V-83 version..."
-
-          python3 - <<'PY'
+          python3 <<'PY'
           import os
           import re
           from pathlib import Path
@@ -140,55 +151,65 @@ jobs:
           version_name = os.environ["APP_VERSION_NAME"]
           version_code = os.environ["APP_VERSION_CODE"]
 
-          roots = [
+          files = [
               Path("app/build.gradle"),
               Path("app/build.gradle.kts"),
               Path("build.gradle"),
               Path("build.gradle.kts")
           ]
 
-          for p in roots:
-              if not p.exists():
+          changed = False
+
+          for path in files:
+              if not path.exists():
                   continue
 
-              text = p.read_text(errors="ignore")
+              text = path.read_text(errors="ignore")
 
-              text = re.sub(
-                  r'versionCode\s+\d+',
+              new_text = re.sub(
+                  r'versionCode\s*=?\s*\d+',
                   f'versionCode {version_code}',
                   text
               )
 
-              text = re.sub(
-                  r'versionName\s+["\'][^"\']+["\']',
+              new_text = re.sub(
+                  r'versionName\s*=?\s*["\'][^"\']+["\']',
                   f'versionName "{version_name}"',
-                  text
+                  new_text
               )
 
-              p.write_text(text)
+              if new_text != text:
+                  path.write_text(new_text)
+                  changed = True
+                  print("Updated:", path)
 
-          print("Version applied:")
-          print("versionCode =", version_code)
-          print("versionName =", version_name)
+          if not changed:
+              print("WARNING: No version declaration was changed.")
+
+          print("V-83 version check complete.")
+          print("versionCode:", version_code)
+          print("versionName:", version_name)
           PY
 
-      - name: Repair AccountStore NoSuchAlgorithmException
+      - name: Repair AccountStore SHA-256 exception
         shell: bash
         working-directory: ${{ env.ANDROID_ROOT }}
         run: |
-          set -e
+          set -euo pipefail
 
-          FILE=$(find . -type f \
+          FILE="$(find . \
+            -type f \
             -path "*/src/main/java/*" \
             -name "AccountStore.java" \
-            -print -quit || true)
+            -print -quit || true)"
 
           if [ -z "$FILE" ]; then
-            echo "AccountStore.java not found. Continuing."
+            echo "AccountStore.java not found."
+            echo "No repair required."
             exit 0
           fi
 
-          echo "Checking:"
+          echo "Checking AccountStore:"
           echo "$FILE"
 
           python3 - "$FILE" <<'PY'
@@ -198,11 +219,19 @@ jobs:
           path = Path(sys.argv[1])
           text = path.read_text(errors="ignore")
 
-          if "NoSuchAlgorithmException" in text:
-              if "import java.security.NoSuchAlgorithmException;" not in text:
+          if "NoSuchAlgorithmException" not in text:
+              print("NoSuchAlgorithmException not present.")
+              raise SystemExit(0)
+
+          if "import java.security.NoSuchAlgorithmException;" not in text:
+              package_line = "package com.myshop.app;"
+
+              if package_line in text:
                   text = text.replace(
-                      "package com.myshop.app;",
-                      "package com.myshop.app;\n\nimport java.security.NoSuchAlgorithmException;"
+                      package_line,
+                      package_line +
+                      "\n\nimport java.security.NoSuchAlgorithmException;",
+                      1
                   )
 
           old = 'return "sha256:" + sha256(canonicalAnswer(answer));'
@@ -211,24 +240,85 @@ jobs:
               new = '''try {
               return "sha256:" + sha256(canonicalAnswer(answer));
           } catch (NoSuchAlgorithmException e) {
-              throw new IllegalStateException("SHA-256 is unavailable", e);
+              throw new IllegalStateException(
+                  "SHA-256 is unavailable",
+                  e
+              );
           }'''
 
-              text = text.replace(old, new)
+              text = text.replace(old, new, 1)
 
           path.write_text(text)
 
-          print("AccountStore repair applied.")
+          print("AccountStore repair completed.")
           PY
 
       - name: Find Gradle launcher
         shell: bash
         working-directory: ${{ env.ANDROID_ROOT }}
         run: |
-          set -e
+          set -euo pipefail
 
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
             echo "GRADLE_CMD=./gradlew" >> "$GITHUB_ENV"
+            echo "Using project Gradle wrapper."
           else
-            echo "GRADLE_CMD=
+            echo "GRADLE_CMD=gradle" >> "$GITHUB_ENV"
+            echo "Using installed Gradle."
+          fi
+
+      - name: Verify launcher manifest
+        shell: bash
+        working-directory: ${{ env.ANDROID_ROOT }}
+        run: |
+          set -euo pipefail
+
+          MANIFEST="$(find . \
+            -path "*/src/main/AndroidManifest.xml" \
+            -print -quit || true)"
+
+          if [ -z "$MANIFEST" ]; then
+            echo "ERROR: AndroidManifest.xml not found."
+            exit 1
+          fi
+
+          echo "Manifest:"
+          echo "$MANIFEST"
+
+          if ! grep -q "android.intent.action.MAIN" "$MANIFEST"; then
+            echo "ERROR: MAIN launcher activity not found."
+            exit 1
+          fi
+
+          if ! grep -q "android.intent.category.LAUNCHER" "$MANIFEST"; then
+            echo "ERROR: LAUNCHER activity not found."
+            exit 1
+          fi
+
+          echo "Launcher manifest verified."
+
+      - name: Prepare Gradle
+        shell: bash
+        working-directory: ${{ env.ANDROID_ROOT }}
+        run: |
+          set -euo pipefail
+
+          $GRADLE_CMD --no-daemon --version
+
+      - name: Clean project
+        shell: bash
+        working-directory: ${{ env.ANDROID_ROOT }}
+        run: |
+          set -euo pipefail
+
+          $GRADLE_CMD \
+            --no-daemon \
+            --stacktrace \
+            clean
+
+      - name: Build DEBUG APK
+        shell: bash
+        working-directory: ${{ env.ANDROID_ROOT }}
+        run: |
+          set -
