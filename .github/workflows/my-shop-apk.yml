@@ -208,21 +208,44 @@ jobs:
             --rerun-tasks \
             --stacktrace
 
+          # IMPORTANT:
+          # The V-62 source can use a nested/temporary project root. After
+          # Gradle assembleRelease, do NOT depend on the earlier ROOT path.
+          # Search the complete GitHub workspace for the real release APK.
           mapfile -t apks < <(
-            find "$ROOT" -type f \
+            find "$GITHUB_WORKSPACE" -type f \
               -path '*/build/outputs/apk/release/*.apk' \
-              -name '*.apk' | sort
+              -name '*.apk' \
+              -print 2>/dev/null | sort
           )
 
-          echo "Release APK files:"
-          printf '%s\n' "${apks[@]:-<none>}"
+          echo "Release APK files found in workspace:"
+          if [ "${#apks[@]}" -gt 0 ]; then
+            printf '%s\n' "${apks[@]}"
+          else
+            echo "<none>"
+          fi
 
           if [ "${#apks[@]}" -ne 1 ]; then
             echo "::error::V-62 requires exactly ONE release APK."
+            echo "APK count=${#apks[@]}"
+            echo "Searching for any APK produced by Gradle:"
+            find "$GITHUB_WORKSPACE" -type f -name '*.apk' -print 2>/dev/null | sort || true
             exit 1
           fi
 
+          echo "Verified release APK: ${apks[0]}"
           echo "path=${apks[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Confirm V-62 APK exists before signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="${{ steps.apk.outputs.path }}"
+          test -f "$APK"
+          test -s "$APK"
+          echo "READY FOR SIGNING: $APK"
+          ls -lh "$APK"
 
       - name: Sign and verify V-62 APK
         id: signed
