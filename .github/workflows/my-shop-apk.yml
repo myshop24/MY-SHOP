@@ -27,19 +27,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t candidates < <(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' -printf '%f\n' | while read -r f; do
-            if [[ "$f" =~ (^|[^0-9])V[-_[:space:]]*([0-9]+)([^0-9]|$) ]]; then
-              echo "${BASH_REMATCH[2]}|$f"
-            fi
-          done | sort -t'|' -k1,1n -k2,2)
+
+          mapfile -t candidates < <(
+            find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' -printf '%f\n' |
+            while IFS= read -r f; do
+              if [[ "$f" =~ (^|[^0-9])V[-_[:space:]]*([0-9]+)([^0-9]|$) ]]; then
+                printf '%s|%s\n' "${BASH_REMATCH[2]}" "$f"
+              fi
+            done |
+            sort -t'|' -k1,1n -k2,2
+          )
 
           if [ "${#candidates[@]}" -eq 0 ]; then
-            echo "::error::No versioned V-XX source ZIP found in repository root."
+            echo "::error::No V-XX source ZIP found in repository root."
+            echo "ZIP files currently present:"
+            find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -iname '*.zip' -printf '%f\n' | sort || true
             exit 1
           fi
 
           MAX_VERSION="${candidates[${#candidates[@]}-1]%%|*}"
-          mapfile -t latest < <(printf '%s\n' "${candidates[@]}" | awk -F'|' -v v="$MAX_VERSION" '$1 == v {print $2}')
+
+          mapfile -t latest < <(
+            printf '%s\n' "${candidates[@]}" |
+            awk -F'|' -v v="$MAX_VERSION" '$1 == v {print $2}'
+          )
 
           if [ "${#latest[@]}" -ne 1 ]; then
             echo "::error::Exactly ONE source ZIP is required for V-$MAX_VERSION; found ${#latest[@]}."
@@ -51,16 +62,46 @@ jobs:
           echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
           echo "VERSION_NUMBER=$MAX_VERSION" >> "$GITHUB_ENV"
           echo "Selected authoritative source: $SOURCE_ZIP"
+          echo "Selected version: V-$MAX_VERSION"
 
-      - name: Verify selected source
+      - name: Inspect source ZIP
         shell: bash
         run: |
           set -euo pipefail
-          test -f "$SOURCE_ZIP"
-          unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)gradlew$'
-          unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)settings\.gradle(\.kts)?$'
-          unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)build\.gradle(\.kts)?$'
-          echo "VERIFIED SOURCE: $SOURCE_ZIP"
+          test -s "$SOURCE_ZIP"
+
+          echo "===== SOURCE ZIP CONTENT CHECK ====="
+          unzip -Z1 "$SOURCE_ZIP" | sed -n '1,120p'
+
+          has_file() {
+            local pattern="$1"
+            unzip -Z1 "$SOURCE_ZIP" | grep -Eq "$pattern"
+          }
+
+          missing=0
+
+          if ! has_file '(^|/)gradlew$'; then
+            echo "::error::gradlew was not found inside $SOURCE_ZIP"
+            missing=1
+          fi
+
+          if ! has_file '(^|/)settings\.gradle(\.kts)?$'; then
+            echo "::error::settings.gradle or settings.gradle.kts was not found inside $SOURCE_ZIP"
+            missing=1
+          fi
+
+          if ! has_file '(^|/)build\.gradle(\.kts)?$'; then
+            echo "::error::build.gradle or build.gradle.kts was not found inside $SOURCE_ZIP"
+            missing=1
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::The selected ZIP is not a complete Gradle Android source project."
+            echo "Expected the ZIP to contain the Android project source, including gradlew, settings.gradle(.kts), and build.gradle(.kts)."
+            exit 1
+          fi
+
+          echo "SOURCE ZIP STRUCTURE: PASSED"
 
       - name: Extract selected source
         shell: bash
@@ -75,17 +116,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           mapfile -t settings_files < <(
-            find "$SOURCE_DIR" -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -print | sort
+            find "$SOURCE_DIR" -type f \
+              \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
+              -not -path '*/build/*' |
+            sort
           )
+
           if [ "${#settings_files[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly ONE Android project; found ${#settings_files[@]}."
+            echo "::error::Expected exactly ONE settings.gradle(.kts); found ${#settings_files[@]}."
             printf '%s\n' "${settings_files[@]:-<none>}"
             exit 1
           fi
+
           ROOT="$(dirname "${settings_files[0]}")"
-          test -f "$ROOT/gradlew"
-          test -f "$ROOT/build.gradle" || test -f "$ROOT/build.gradle.kts"
+
+          if [ ! -f "$ROOT/gradlew" ]; then
+            echo "::error::gradlew is not beside the selected settings file."
+            echo "Project root: $ROOT"
+            find "$SOURCE_DIR" -type f -name gradlew -print || true
+            exit 1
+          fi
+
+          if [ ! -f "$ROOT/build.gradle" ] && [ ! -f "$ROOT/build.gradle.kts" ]; then
+            echo "::error::Root build.gradle(.kts) is missing: $ROOT"
+            exit 1
+          fi
+
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "ANDROID PROJECT: $ROOT"
 
@@ -104,16 +162,22 @@ jobs:
         run: |
           set -euo pipefail
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       - name: Generate unique version
         shell: bash
         run: |
           set -euo pipefail
+
           VERSION_CODE="$((VERSION_NUMBER * 10000 + GITHUB_RUN_NUMBER))"
           VERSION_NAME="2.9.${VERSION_NUMBER}"
+
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+
           echo "MY SHOP V-$VERSION_NUMBER VERSION_NAME=$VERSION_NAME"
           echo "MY SHOP V-$VERSION_NUMBER VERSION_CODE=$VERSION_CODE"
 
@@ -121,55 +185,98 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           ROOT="${{ steps.project.outputs.root }}"
-          mapfile -t gradle_files < <(find "$ROOT" -type f \( -name 'build.gradle' -o -name 'build.gradle.kts' \) -print | sort)
+
+          mapfile -t gradle_files < <(
+            find "$ROOT" -type f \
+              \( -name 'build.gradle' -o -name 'build.gradle.kts' \) \
+              -not -path '*/build/*' |
+            sort
+          )
+
           python3 - "$VERSION_CODE" "$VERSION_NAME" "${gradle_files[@]}" <<'PY'
-          import re, sys
+          import re
+          import sys
           from pathlib import Path
+
           code, name = sys.argv[1], sys.argv[2]
           files = [Path(x) for x in sys.argv[3:]]
+
           code_re = re.compile(r'(\bversionCode\s*(?:=\s*)?)\d+')
           name_re = re.compile(r'(\bversionName\s*(?:=\s*)?)(["\'])(.*?)(\2)')
-          changed_code = changed_name = False
+
+          changed_code = False
+          changed_name = False
+
           for p in files:
-              text = p.read_text(encoding='utf-8')
-              if 'com.android.application' not in text and 'applicationId' not in text:
+              text = p.read_text(encoding="utf-8")
+
+              # Only touch Android application modules.
+              if "com.android.application" not in text and "applicationId" not in text:
                   continue
-              new, n1 = code_re.subn(r'\g<1>'+code, text, count=1)
-              new, n2 = name_re.subn(r'\g<1>\g<2>'+name+r'\g<4>', new, count=1)
+
+              new, n1 = code_re.subn(r'\g<1>' + code, text, count=1)
+              new, n2 = name_re.subn(r'\g<1>\g<2>' + name + r'\g<4>', new, count=1)
+
+              if new != text:
+                  p.write_text(new, encoding="utf-8")
+
               changed_code |= bool(n1)
               changed_name |= bool(n2)
-              if new != text:
-                  p.write_text(new, encoding='utf-8')
+
           if not changed_code or not changed_name:
-              raise SystemExit('ERROR: Could not update versionCode and versionName.')
-          print(f'Applied versionName={name}, versionCode={code}')
+              raise SystemExit(
+                  "ERROR: Could not update versionCode/versionName. "
+                  "Check that the Android app module defines both values."
+              )
+
+          print(f"Applied versionName={name}, versionCode={code}")
           PY
 
-      - name: Clean build outputs
+      - name: Clean all APK outputs
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf "${{ steps.project.outputs.root }}/app/build/outputs/apk" release
+          ROOT="${{ steps.project.outputs.root }}"
+          rm -rf "$ROOT"/**/build/outputs/apk release 2>/dev/null || true
+          find "$SOURCE_DIR" -type f -path '*/build/outputs/apk/*.apk' -delete 2>/dev/null || true
+          rm -rf release
+          mkdir -p release
 
       - name: Build exactly one release APK
         id: apk
         shell: bash
         run: |
           set -euo pipefail
+
           ROOT="${{ steps.project.outputs.root }}"
           cd "$ROOT"
           chmod +x gradlew
-          ./gradlew clean assembleRelease --no-daemon --no-build-cache --rerun-tasks --stacktrace
 
-          mapfile -t apks < <(find "$GITHUB_WORKSPACE" -type f -path '*/build/outputs/apk/release/*.apk' -name '*.apk' -print 2>/dev/null | sort)
+          ./gradlew clean assembleRelease \
+            --no-daemon \
+            --no-build-cache \
+            --rerun-tasks \
+            --stacktrace
+
+          mapfile -t apks < <(
+            find "$ROOT" -type f \
+              -path '*/build/outputs/apk/release/*.apk' \
+              -name '*.apk' |
+            sort
+          )
+
           echo "Release APK files found:"
           printf '%s\n' "${apks[@]:-<none>}"
+
           if [ "${#apks[@]}" -ne 1 ]; then
             echo "::error::Exactly ONE release APK required; found ${#apks[@]}."
-            find "$GITHUB_WORKSPACE" -type f -name '*.apk' -print 2>/dev/null | sort || true
+            echo "All APK files found:"
+            find "$GITHUB_WORKSPACE" -type f -name '*.apk' -print | sort || true
             exit 1
           fi
+
           echo "path=${apks[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Sign and verify APK
@@ -177,8 +284,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           UNSIGNED="${{ steps.apk.outputs.path }}"
           BT="$ANDROID_HOME/build-tools/35.0.0"
+
           KEYSTORE="$RUNNER_TEMP/my-shop-v${VERSION_NUMBER}-release.jks"
           ALIGNED="$RUNNER_TEMP/my-shop-v${VERSION_NUMBER}-aligned.apk"
           SIGNED="$RUNNER_TEMP/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.apk"
@@ -191,10 +300,10 @@ jobs:
             -keyalg RSA \
             -keysize 2048 \
             -validity 10000 \
-            -dname "CN=MY SHOP V${VERSION_NUMBER}, OU=Release, O=MY SHOP, C=US" \
-            >/dev/null 2>&1
+            -dname "CN=MY SHOP V${VERSION_NUMBER}, OU=Release, O=MY SHOP, C=US"
 
           "$BT/zipalign" -f -p 4 "$UNSIGNED" "$ALIGNED"
+
           "$BT/apksigner" sign \
             --ks "$KEYSTORE" \
             --ks-pass pass:changeit \
@@ -206,9 +315,11 @@ jobs:
             --out "$SIGNED" \
             "$ALIGNED"
 
-          "$BT/apksigner" verify --verbose --min-sdk-version 23 "$SIGNED"
+          "$BT/apksigner" verify --verbose "$SIGNED"
+
           BADGING="$("$BT/aapt2" dump badging "$SIGNED")"
           echo "$BADGING"
+
           echo "$BADGING" | grep -Fq "versionName='$VERSION_NAME'"
           echo "$BADGING" | grep -Fq "versionCode='$VERSION_CODE'"
           echo "$BADGING" | grep -Fq "package: name='com.myshop.app'"
@@ -220,14 +331,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           rm -rf release
           mkdir -p release
-          cp "${{ steps.signed.outputs.signed_path }}" "release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.apk"
-          sha256sum "release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.apk" > "release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.sha256"
+
+          FINAL="release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.apk"
+
+          cp "${{ steps.signed.outputs.signed_path }}" "$FINAL"
+          sha256sum "$FINAL" > "release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.sha256"
 
           APK_COUNT="$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')"
+
           test "$APK_COUNT" -eq 1
-          test -s "release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.apk"
+          test -s "$FINAL"
 
           echo "===== FINAL V-$VERSION_NUMBER RELEASE ====="
           ls -lh release
@@ -247,7 +363,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')" -eq 1
+
+          APK_COUNT="$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')"
+          test "$APK_COUNT" -eq 1
           test -s "release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.apk"
           test -s "release/MY_SHOP_V${VERSION_NUMBER}_FINAL_RELEASE.sha256"
+
           echo "MY SHOP V-$VERSION_NUMBER FINAL RELEASE: ONE VERIFIED APK READY"
