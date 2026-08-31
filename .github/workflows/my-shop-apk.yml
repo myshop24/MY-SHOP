@@ -1,96 +1,132 @@
-name: V-84 MY SHOP - SINGLE VERIFIED APK
+name: V-81 MY SHOP FINAL RELEASE
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
 
+env:
+  PRIMARY_SOURCE_ZIP: MY_SHOP_V-79_FULL_PROJECT_SOURCE.zip
+  VERSION_NUMBER: "81"
+  VERSION_NAME: "2.9.81"
+  PACKAGE_NAME: com.myshop.app
+  SOURCE_DIR: v81_source
+
 jobs:
   build:
-    name: V-84 - SINGLE VERIFIED APK
+    name: V-81 - SINGLE VERIFIED APK
     runs-on: ubuntu-latest
-
-    env:
-      APP_VERSION_NAME: "8.4.0"
-      APP_VERSION_CODE: "84"
-      SOURCE_ZIP: "V-77_MY_SHOP_FULL_SOURCE.zip"
+    timeout-minutes: 45
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Select official source ZIP
+      - name: Require exactly one source input
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "Checking official source ZIP..."
-
-          if [ ! -f "$SOURCE_ZIP" ]; then
-            echo "ERROR: Official source ZIP not found:"
-            echo "$SOURCE_ZIP"
+          test -s "$PRIMARY_SOURCE_ZIP" || {
+            echo "::error::Missing source ZIP: $PRIMARY_SOURCE_ZIP"
             exit 1
-          fi
-
-          echo "Using:"
-          ls -lh "$SOURCE_ZIP"
+          }
 
       - name: Extract source
         shell: bash
         run: |
           set -euo pipefail
-
-          rm -rf "$GITHUB_WORKSPACE/build_source"
-          mkdir -p "$GITHUB_WORKSPACE/build_source"
-
-          unzip -q "$SOURCE_ZIP" \
-            -d "$GITHUB_WORKSPACE/build_source"
-
-          echo "Source extracted successfully."
+          rm -rf "$SOURCE_DIR" release
+          mkdir -p "$SOURCE_DIR" release
+          unzip -q "$PRIMARY_SOURCE_ZIP" -d "$SOURCE_DIR"
 
       - name: Locate exactly one Android project
+        id: project
         shell: bash
         run: |
           set -euo pipefail
-
-          mapfile -t PROJECTS < <(
-            find "$GITHUB_WORKSPACE/build_source" \
-              -type f \
-              \( \
-                -name "settings.gradle" \
-                -o -name "settings.gradle.kts" \
-              \) \
-              -print
+          mapfile -t settings_files < <(
+            find "$SOURCE_DIR" -type f \
+              \( -name settings.gradle -o -name settings.gradle.kts \) \
+              -not -path '*/build/*' | sort
           )
-
-          COUNT="${#PROJECTS[@]}"
-
-          echo "Android projects found: $COUNT"
-
-          if [ "$COUNT" -ne 1 ]; then
-            echo "ERROR: Expected exactly ONE Android project."
-            printf '%s\n' "${PROJECTS[@]}"
+          if [ "${#settings_files[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly ONE Android project; found ${#settings_files[@]}"
+            printf '%s\n' "${settings_files[@]:-<none>}"
             exit 1
           fi
+          ROOT="$(dirname "${settings_files[0]}")"
+          if [ -f "$ROOT/app/build.gradle" ]; then
+            APP_GRADLE="$ROOT/app/build.gradle"
+          elif [ -f "$ROOT/app/build.gradle.kts" ]; then
+            APP_GRADLE="$ROOT/app/build.gradle.kts"
+          else
+            echo "::error::app Gradle file not found"
+            exit 1
+          fi
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "app_gradle=$APP_GRADLE" >> "$GITHUB_OUTPUT"
 
-          PROJECT="${PROJECTS[0]}"
-          ANDROID_ROOT="$(dirname "$PROJECT")"
+      - name: Harden launcher startup and repair known build issue
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="${{ steps.project.outputs.root }}"
 
-          echo "ANDROID_ROOT=$ANDROID_ROOT" >> "$GITHUB_ENV"
+          # Remove reference-only dashboard image from Android resources.
+          BAD="$ROOT/app/src/main/res/drawable/myshop_dashboard_reference.png"
+          rm -f "$BAD"
+          test ! -e "$BAD"
 
-          echo "Android project:"
-          echo "$ANDROID_ROOT"
+          # Launcher must use framework Activity so process startup does not depend
+          # on AppCompat initialization. Existing recovery login remains intact.
+          LOGIN="$ROOT/app/src/main/java/com/myshop/app/LoginActivity.java"
+          test -f "$LOGIN"
+          python3 - "$LOGIN" <<'PY'
+          from pathlib import Path
+          import sys
+          p = Path(sys.argv[1])
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('import androidx.appcompat.app.AppCompatActivity;\n', '')
+          s = s.replace('public class LoginActivity extends AppCompatActivity {',
+                        'public class LoginActivity extends android.app.Activity {')
+          p.write_text(s, encoding='utf-8')
+          PY
+          grep -Fq 'public class LoginActivity extends android.app.Activity' "$LOGIN"
+
+          # Known compile fix carried forward from V-78.
+          mapfile -t ACCOUNT_FILES < <(
+            find "$ROOT" -type f -name AccountStore.java -not -path '*/build/*' | sort
+          )
+          if [ "${#ACCOUNT_FILES[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly ONE AccountStore.java"
+            printf '%s\n' "${ACCOUNT_FILES[@]:-<none>}"
+            exit 1
+          fi
+          ACCOUNT="${ACCOUNT_FILES[0]}"
+          python3 - "$ACCOUNT" <<'PY'
+          from pathlib import Path
+          import sys
+          p = Path(sys.argv[1])
+          s = p.read_text(encoding='utf-8')
+          old = 'return "sha256:" + sha256(canonicalAnswer(answer));'
+          if old in s:
+              new = ('try {\n'
+                     '              return "sha256:" + sha256(canonicalAnswer(answer));\n'
+                     '          } catch (java.security.NoSuchAlgorithmException e) {\n'
+                     '              throw new IllegalStateException("SHA-256 algorithm unavailable", e);\n'
+                     '          }')
+              s = s.replace(old, new, 1)
+          p.write_text(s, encoding='utf-8')
+          PY
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -99,334 +135,170 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
 
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
+      - name: Set up Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
 
-      - name: Install Gradle 8.9
+      - name: Apply and verify V-81 version
         shell: bash
         run: |
           set -euo pipefail
-
-          GRADLE_VERSION="8.9"
-
-          curl -fL \
-            -o /tmp/gradle.zip \
-            "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
-
-          rm -rf "/opt/gradle-${GRADLE_VERSION}"
-
-          unzip -q /tmp/gradle.zip -d /opt
-
-          echo "/opt/gradle-${GRADLE_VERSION}/bin" >> "$GITHUB_PATH"
-
-          gradle --version
-
-      - name: Apply V-84 version
-        shell: bash
-        working-directory: ${{ env.ANDROID_ROOT }}
-        run: |
-          set -euo pipefail
-
-          python3 <<'PY'
-          import os
-          import re
+          APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
+          python3 - "$APP_GRADLE" <<'PY'
+          import re, sys
           from pathlib import Path
-
-          version_name = os.environ["APP_VERSION_NAME"]
-          version_code = os.environ["APP_VERSION_CODE"]
-
-          files = [
-              Path("app/build.gradle"),
-              Path("app/build.gradle.kts"),
-              Path("build.gradle"),
-              Path("build.gradle.kts")
-          ]
-
-          for path in files:
-              if not path.exists():
-                  continue
-
-              text = path.read_text(errors="ignore")
-
-              text = re.sub(
-                  r'versionCode\s*[=:]?\s*\d+',
-                  f'versionCode {version_code}',
-                  text
-              )
-
-              text = re.sub(
-                  r'versionName\s*[=:]?\s*["\'][^"\']+["\']',
-                  f'versionName "{version_name}"',
-                  text
-              )
-
-              path.write_text(text)
-
-              print("Checked:", path)
-
-          print("V-84 version applied.")
-          print("versionCode:", version_code)
-          print("versionName:", version_name)
+          p=Path(sys.argv[1]); s=p.read_text(encoding='utf-8')
+          s,n1=re.subn(r'\bversionCode\s*(?:=\s*)?\d+', 'versionCode 81', s, count=1)
+          s,n2=re.subn(r'\bversionName\s*(?:=\s*)?["\'][^"\']*["\']', 'versionName \'2.9.81\'', s, count=1)
+          if n1 != 1 or n2 != 1:
+              raise SystemExit(f'Version replacement failed: versionCode={n1}, versionName={n2}')
+          p.write_text(s, encoding='utf-8')
           PY
-
-      - name: Repair AccountStore SHA-256 exception
-        shell: bash
-        working-directory: ${{ env.ANDROID_ROOT }}
-        run: |
-          set -euo pipefail
-
-          FILE="$(
-            find . \
-              -type f \
-              -path "*/src/main/java/*" \
-              -name "AccountStore.java" \
-              -print -quit
-          )"
-
-          if [ -z "$FILE" ]; then
-            echo "AccountStore.java not found."
-            echo "No AccountStore repair required."
-            exit 0
-          fi
-
-          echo "AccountStore:"
-          echo "$FILE"
-
-          python3 - "$FILE" <<'PY'
-          import sys
-          import re
-          from pathlib import Path
-
-          path = Path(sys.argv[1])
-          text = path.read_text(errors="ignore")
-
-          if "NoSuchAlgorithmException" not in text:
-              print("NoSuchAlgorithmException found.")
-              raise SystemExit(0)
-
-          if "import java.security.NoSuchAlgorithmException;" not in text:
-              match = re.search(
-                  r'(^package\s+[^;]+;)',
-                  text,
-                  flags=re.MULTILINE
-              )
-
-              if match:
-                  text = text[:match.end()] + \
-                      "\n\nimport java.security.NoSuchAlgorithmException;" + \
-                      text[match.end():]
-
-          old = 'return "sha256:" + sha256(canonicalAnswer(answer));'
-
-          if old in text:
-              new = '''try {
-              return "sha256:" + sha256(canonicalAnswer(answer));
-          } catch (NoSuchAlgorithmException e) {
-              throw new IllegalStateException(
-                  "SHA-256 is unavailable",
-                  e
-              );
-          }'''
-
-              text = text.replace(old, new, 1)
-
-          path.write_text(text)
-
-          print("AccountStore SHA-256 repair completed.")
-          PY
-
-      - name: Find Gradle launcher
-        shell: bash
-        working-directory: ${{ env.ANDROID_ROOT }}
-        run: |
-          set -euo pipefail
-
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            echo "GRADLE_CMD=./gradlew" >> "$GITHUB_ENV"
-            echo "Using Gradle wrapper."
-          else
-            echo "GRADLE_CMD=gradle" >> "$GITHUB_ENV"
-            echo "Using installed Gradle."
-          fi
+          grep -Eq 'versionCode[[:space:]]*(=)?[[:space:]]*80' "$APP_GRADLE"
+          grep -Eq 'versionName[[:space:]]*(=)?[[:space:]]*["'"']2\.9\.80["'"']' "$APP_GRADLE"
 
       - name: Verify launcher manifest
         shell: bash
-        working-directory: ${{ env.ANDROID_ROOT }}
         run: |
           set -euo pipefail
+          ROOT="${{ steps.project.outputs.root }}"
+          MANIFEST="$ROOT/app/src/main/AndroidManifest.xml"
+          test -s "$MANIFEST"
+          grep -Fq 'android:name=".LoginActivity"' "$MANIFEST"
+          grep -Fq 'android:name="android.intent.action.MAIN"' "$MANIFEST"
+          grep -Fq 'android:name="android.intent.category.LAUNCHER"' "$MANIFEST"
+          grep -Fq 'android:exported="true"' "$MANIFEST"
 
-          MANIFEST="$(
-            find . \
-              -type f \
-              -path "*/src/main/AndroidManifest.xml" \
-              -print -quit
-          )"
-
-          if [ -z "$MANIFEST" ]; then
-            echo "ERROR: AndroidManifest.xml not found."
+      - name: Build release APK
+        id: apk
+        working-directory: ${{ steps.project.outputs.root }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f ./gradlew ]; then
+            chmod +x ./gradlew
+            ./gradlew clean assembleRelease --no-daemon --no-build-cache --rerun-tasks --stacktrace
+          else
+            gradle clean assembleRelease --no-daemon --no-build-cache --rerun-tasks --stacktrace
+          fi
+          mapfile -t apks < <(find app/build/outputs/apk/release -type f -name '*.apk' | sort)
+          if [ "${#apks[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly ONE release APK; found ${#apks[@]}"
+            printf '%s\n' "${apks[@]:-<none>}"
             exit 1
           fi
+          echo "path=${apks[0]}" >> "$GITHUB_OUTPUT"
 
-          echo "Manifest:"
-          echo "$MANIFEST"
-
-          grep -q "android.intent.action.MAIN" "$MANIFEST"
-
-          grep -q "android.intent.category.LAUNCHER" "$MANIFEST"
-
-          echo "Launcher manifest verified."
-
-      - name: Prepare Gradle
+      - name: Require permanent release signing key
         shell: bash
-        working-directory: ${{ env.ANDROID_ROOT }}
+        env:
+          KEYSTORE_B64: ${{ secrets.MY_SHOP_RELEASE_KEYSTORE_B64 }}
+          STORE_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MY_SHOP_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          test -n "$KEYSTORE_B64"
+          test -n "$STORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/myshop-release.jks"
+          test -s "$RUNNER_TEMP/myshop-release.jks"
 
-          "$GRADLE_CMD" \
-            --no-daemon \
-            --version
-
-      - name: Clean project
+      - name: Sign and verify V-81 APK
+        id: signed
         shell: bash
-        working-directory: ${{ env.ANDROID_ROOT }}
+        env:
+          STORE_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MY_SHOP_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          UNSIGNED="${{ steps.apk.outputs.path }}"
+          ALIGNED="$RUNNER_TEMP/MY_SHOP_V81_ALIGNED.apk"
+          SIGNED="$RUNNER_TEMP/MY_SHOP_V81_FINAL.apk"
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" "$ALIGNED"
+          "$BT/apksigner" sign \
+            --ks "$RUNNER_TEMP/myshop-release.jks" \
+            --ks-pass env:STORE_PASSWORD \
+            --key-pass env:KEY_PASSWORD \
+            --ks-key-alias "$KEY_ALIAS" \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out "$SIGNED" "$ALIGNED"
+          "$BT/apksigner" verify --verbose "$SIGNED"
+          BADGING="$("$BT/aapt2" dump badging "$SIGNED")"
+          echo "$BADGING"
+          echo "$BADGING" | grep -Fq "package: name='com.myshop.app'"
+          echo "$BADGING" | grep -Fq "versionName='2.9.81'"
+          echo "$BADGING" | grep -Fq "versionCode='80'"
+          echo "$BADGING" | grep -Fq "launchable-activity: name='com.myshop.app.LoginActivity'"
+          echo "signed_path=$SIGNED" >> "$GITHUB_OUTPUT"
 
-          "$GRADLE_CMD" \
-            --no-daemon \
-            --stacktrace \
-            clean
-
-      - name: Build DEBUG APK
-        shell: bash
-        working-directory: ${{ env.ANDROID_ROOT }}
-        run: |
-          set -euo pipefail
-
-          "$GRADLE_CMD" \
-            --no-daemon \
-            --stacktrace \
-            --warning-mode all \
-            assembleDebug
-
-      - name: Find exactly one APK
-        shell: bash
-        working-directory: ${{ env.ANDROID_ROOT }}
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$GITHUB_WORKSPACE/final_apk"
-
-          mapfile -t APKS < <(
-            find . \
-              -type f \
-              -path "*/build/outputs/apk/**/*.apk" \
-              -print
-          )
-
-          COUNT="${#APKS[@]}"
-
-          echo "APK files found: $COUNT"
-
-          if [ "$COUNT" -ne 1 ]; then
-            echo "ERROR: Expected exactly ONE APK."
-            printf '%s\n' "${APKS[@]}"
-            exit 1
-          fi
-
-          cp "${APKS[0]}" \
-            "$GITHUB_WORKSPACE/final_apk/MY-SHOP-V84.apk"
-
-          echo "Final APK:"
-          ls -lh "$GITHUB_WORKSPACE/final_apk/MY-SHOP-V84.apk"
-
-      - name: Verify APK exists
+      - name: Prepare exactly ONE final APK
         shell: bash
         run: |
           set -euo pipefail
+          FINAL='release/V-81 MY SHOP FINAL RELEASE.apk'
+          SHA='release/V-81 MY SHOP FINAL RELEASE.sha256'
+          mkdir -p release
+          cp '${{ steps.signed.outputs.signed_path }}' "$FINAL"
+          sha256sum "$FINAL" > "$SHA"
+          test "$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')" -eq 1
+          test -s "$FINAL"
+          test -s "$SHA"
 
-          test -f "$GITHUB_WORKSPACE/final_apk/MY-SHOP-V84.apk"
+      - name: Runtime launch smoke test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: Pixel_6
+          emulator-options: -no-window -no-audio -no-boot-anim
+          disable-animations: true
+          script: |
+            set -euo pipefail
 
-          echo "APK exists."
+            APK="release/V-81 MY SHOP FINAL RELEASE.apk"
 
-      - name: Verify APK signature
-        shell: bash
-        run: |
-          set -euo pipefail
+            adb install -r "$APK"
+            adb shell am force-stop "$PACKAGE_NAME"
+            adb shell am start -W -n "$PACKAGE_NAME/.LoginActivity"
 
-          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
-            "$GITHUB_WORKSPACE/final_apk/MY-SHOP-V84.apk"
+            sleep 3
 
-          echo "APK signature verified."
+            if adb shell pidof "$PACKAGE_NAME" >/dev/null 2>&1; then
+              echo "RUNTIME LAUNCH PASSED"
+            else
+              echo "::error::RUNTIME LAUNCH FAILED"
+              adb logcat -d -t 1000 | grep -E 'AndroidRuntime|FATAL EXCEPTION|com.myshop.app' || true
+              exit 1
+            fi
 
-      - name: Verify package name
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging \
-            "$GITHUB_WORKSPACE/final_apk/MY-SHOP-V84.apk" \
-            | head -n 1
-
-      - name: Verify launcher activity
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging \
-            "$GITHUB_WORKSPACE/final_apk/MY-SHOP-V84.apk" \
-            | grep -q "launchable-activity"
-
-          echo "Launcher activity verified."
-
-      - name: Verify exactly one final APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          COUNT="$(
-            find "$GITHUB_WORKSPACE/final_apk" \
-              -maxdepth 1 \
-              -type f \
-              -name "*.apk" \
-              | wc -l
-          )"
-
-          echo "Final APK count: $COUNT"
-
-          if [ "$COUNT" -ne 1 ]; then
-            echo "ERROR: Final APK count is not exactly 1."
-            exit 1
-          fi
-
-      - name: Upload V-84 final APK
+      - name: Upload V-81 final release
         uses: actions/upload-artifact@v4
         with:
-          name: MY-SHOP-V84-FINAL-APK
-          path: final_apk/MY-SHOP-V84.apk
+          name: V-81-MY-SHOP-FINAL-RELEASE
+          path: |
+            release/V-81 MY SHOP FINAL RELEASE.apk
+            release/V-81 MY SHOP FINAL RELEASE.sha256
           if-no-files-found: error
+          retention-days: 30
 
       - name: Final ONE APK guard
         shell: bash
         run: |
           set -euo pipefail
-
-          COUNT="$(
-            find "$GITHUB_WORKSPACE/final_apk" \
-              -type f \
-              -name "*.apk" \
-              | wc -l
-          )"
-
-          if [ "$COUNT" -ne 1 ]; then
-            echo "ERROR: Final output must contain exactly ONE APK."
-            exit 1
-          fi
-
-          echo "SUCCESS: Exactly ONE verified APK prepared."
+          test "$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')" -eq 1
+          test -s 'release/V-81 MY SHOP FINAL RELEASE.apk'
+          echo 'FINAL V-81 CHECK PASSED'
+          echo 'Exactly ONE signed APK exists.'
+          echo 'Version: 2.9.81'
+          echo 'Package: com.myshop.app'
