@@ -1,4 +1,4 @@
-name: V-83 MY SHOP - SINGLE VERIFIED APK
+name: V-84 MY SHOP - SINGLE VERIFIED APK
 
 on:
   workflow_dispatch:
@@ -11,12 +11,12 @@ permissions:
 
 jobs:
   build:
-    name: V-83 - SINGLE VERIFIED APK
+    name: V-84 - SINGLE VERIFIED APK
     runs-on: ubuntu-latest
 
     env:
-      APP_VERSION_NAME: "8.3.0"
-      APP_VERSION_CODE: "83"
+      APP_VERSION_NAME: "8.4.0"
+      APP_VERSION_CODE: "84"
       SOURCE_ZIP: "V-77_MY_SHOP_FULL_SOURCE.zip"
 
     steps:
@@ -37,10 +37,8 @@ jobs:
             exit 1
           fi
 
-          echo "Official source:"
+          echo "Using:"
           ls -lh "$SOURCE_ZIP"
-
-          echo "Source ZIP selected successfully."
 
       - name: Extract source
         shell: bash
@@ -50,19 +48,10 @@ jobs:
           rm -rf "$GITHUB_WORKSPACE/build_source"
           mkdir -p "$GITHUB_WORKSPACE/build_source"
 
-          unzip -q "$SOURCE_ZIP" -d "$GITHUB_WORKSPACE/build_source"
+          unzip -q "$SOURCE_ZIP" \
+            -d "$GITHUB_WORKSPACE/build_source"
 
-          echo "Source extracted."
-
-          find "$GITHUB_WORKSPACE/build_source" \
-            -type f \
-            \
-              -name "settings.gradle" \
-              -o -name "settings.gradle.kts" \
-              -o -name "build.gradle" \
-              -o -name "build.gradle.kts" \
-            \
-            -print
+          echo "Source extracted successfully."
 
       - name: Locate exactly one Android project
         shell: bash
@@ -72,10 +61,10 @@ jobs:
           mapfile -t PROJECTS < <(
             find "$GITHUB_WORKSPACE/build_source" \
               -type f \
-              \
+              \( \
                 -name "settings.gradle" \
                 -o -name "settings.gradle.kts" \
-              \
+              \) \
               -print
           )
 
@@ -137,7 +126,7 @@ jobs:
 
           gradle --version
 
-      - name: Apply V-83 version
+      - name: Apply V-84 version
         shell: bash
         working-directory: ${{ env.ANDROID_ROOT }}
         run: |
@@ -158,35 +147,29 @@ jobs:
               Path("build.gradle.kts")
           ]
 
-          changed = False
-
           for path in files:
               if not path.exists():
                   continue
 
               text = path.read_text(errors="ignore")
 
-              new_text = re.sub(
-                  r'versionCode\s*=?\s*\d+',
+              text = re.sub(
+                  r'versionCode\s*[=:]?\s*\d+',
                   f'versionCode {version_code}',
                   text
               )
 
-              new_text = re.sub(
-                  r'versionName\s*=?\s*["\'][^"\']+["\']',
+              text = re.sub(
+                  r'versionName\s*[=:]?\s*["\'][^"\']+["\']',
                   f'versionName "{version_name}"',
-                  new_text
+                  text
               )
 
-              if new_text != text:
-                  path.write_text(new_text)
-                  changed = True
-                  print("Updated:", path)
+              path.write_text(text)
 
-          if not changed:
-              print("WARNING: No version declaration was changed.")
+              print("Checked:", path)
 
-          print("V-83 version check complete.")
+          print("V-84 version applied.")
           print("versionCode:", version_code)
           print("versionName:", version_name)
           PY
@@ -197,42 +180,46 @@ jobs:
         run: |
           set -euo pipefail
 
-          FILE="$(find . \
-            -type f \
-            -path "*/src/main/java/*" \
-            -name "AccountStore.java" \
-            -print -quit || true)"
+          FILE="$(
+            find . \
+              -type f \
+              -path "*/src/main/java/*" \
+              -name "AccountStore.java" \
+              -print -quit
+          )"
 
           if [ -z "$FILE" ]; then
             echo "AccountStore.java not found."
-            echo "No repair required."
+            echo "No AccountStore repair required."
             exit 0
           fi
 
-          echo "Checking AccountStore:"
+          echo "AccountStore:"
           echo "$FILE"
 
           python3 - "$FILE" <<'PY'
           import sys
+          import re
           from pathlib import Path
 
           path = Path(sys.argv[1])
           text = path.read_text(errors="ignore")
 
           if "NoSuchAlgorithmException" not in text:
-              print("NoSuchAlgorithmException not present.")
+              print("NoSuchAlgorithmException found.")
               raise SystemExit(0)
 
           if "import java.security.NoSuchAlgorithmException;" not in text:
-              package_line = "package com.myshop.app;"
+              match = re.search(
+                  r'(^package\s+[^;]+;)',
+                  text,
+                  flags=re.MULTILINE
+              )
 
-              if package_line in text:
-                  text = text.replace(
-                      package_line,
-                      package_line +
-                      "\n\nimport java.security.NoSuchAlgorithmException;",
-                      1
-                  )
+              if match:
+                  text = text[:match.end()] + \
+                      "\n\nimport java.security.NoSuchAlgorithmException;" + \
+                      text[match.end():]
 
           old = 'return "sha256:" + sha256(canonicalAnswer(answer));'
 
@@ -250,7 +237,7 @@ jobs:
 
           path.write_text(text)
 
-          print("AccountStore repair completed.")
+          print("AccountStore SHA-256 repair completed.")
           PY
 
       - name: Find Gradle launcher
@@ -262,7 +249,7 @@ jobs:
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
             echo "GRADLE_CMD=./gradlew" >> "$GITHUB_ENV"
-            echo "Using project Gradle wrapper."
+            echo "Using Gradle wrapper."
           else
             echo "GRADLE_CMD=gradle" >> "$GITHUB_ENV"
             echo "Using installed Gradle."
@@ -274,9 +261,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          MANIFEST="$(find . \
-            -path "*/src/main/AndroidManifest.xml" \
-            -print -quit || true)"
+          MANIFEST="$(
+            find . \
+              -type f \
+              -path "*/src/main/AndroidManifest.xml" \
+              -print -quit
+          )"
 
           if [ -z "$MANIFEST" ]; then
             echo "ERROR: AndroidManifest.xml not found."
@@ -286,15 +276,9 @@ jobs:
           echo "Manifest:"
           echo "$MANIFEST"
 
-          if ! grep -q "android.intent.action.MAIN" "$MANIFEST"; then
-            echo "ERROR: MAIN launcher activity not found."
-            exit 1
-          fi
+          grep -q "android.intent.action.MAIN" "$MANIFEST"
 
-          if ! grep -q "android.intent.category.LAUNCHER" "$MANIFEST"; then
-            echo "ERROR: LAUNCHER activity not found."
-            exit 1
-          fi
+          grep -q "android.intent.category.LAUNCHER" "$MANIFEST"
 
           echo "Launcher manifest verified."
 
@@ -304,7 +288,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          $GRADLE_CMD --no-daemon --version
+          "$GRADLE_CMD" \
+            --no-daemon \
+            --version
 
       - name: Clean project
         shell: bash
@@ -312,7 +298,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          $GRADLE_CMD \
+          "$GRADLE_CMD" \
             --no-daemon \
             --stacktrace \
             clean
@@ -321,4 +307,126 @@ jobs:
         shell: bash
         working-directory: ${{ env.ANDROID_ROOT }}
         run: |
-          set -
+          set -euo pipefail
+
+          "$GRADLE_CMD" \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all \
+            assembleDebug
+
+      - name: Find exactly one APK
+        shell: bash
+        working-directory: ${{ env.ANDROID_ROOT }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$GITHUB_WORKSPACE/final_apk"
+
+          mapfile -t APKS < <(
+            find . \
+              -type f \
+              -path "*/build/outputs/apk/**/*.apk" \
+              -print
+          )
+
+          COUNT="${#APKS[@]}"
+
+          echo "APK files found: $COUNT"
+
+          if [ "$COUNT" -ne 1 ]; then
+            echo "ERROR: Expected exactly ONE APK."
+            printf '%s\n' "${APKS[@]}"
+            exit 1
+          fi
+
+          cp "${APKS[0]}" \
+            "$GITHUB_WORKSPACE/final_apk/MY-SHOP-V84.apk"
+
+          echo "Final APK:"
+          ls -lh "$GITHUB_WORKSPACE/final_apk/MY-SHOP-V84.apk"
+
+      - name: Verify APK exists
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f "$GITHUB_WORKSPACE/final_apk/MY-SHOP-V84.apk"
+
+          echo "APK exists."
+
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+            "$GITHUB_WORKSPACE/final_apk/MY-SHOP-V84.apk"
+
+          echo "APK signature verified."
+
+      - name: Verify package name
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging \
+            "$GITHUB_WORKSPACE/final_apk/MY-SHOP-V84.apk" \
+            | head -n 1
+
+      - name: Verify launcher activity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging \
+            "$GITHUB_WORKSPACE/final_apk/MY-SHOP-V84.apk" \
+            | grep -q "launchable-activity"
+
+          echo "Launcher activity verified."
+
+      - name: Verify exactly one final APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COUNT="$(
+            find "$GITHUB_WORKSPACE/final_apk" \
+              -maxdepth 1 \
+              -type f \
+              -name "*.apk" \
+              | wc -l
+          )"
+
+          echo "Final APK count: $COUNT"
+
+          if [ "$COUNT" -ne 1 ]; then
+            echo "ERROR: Final APK count is not exactly 1."
+            exit 1
+          fi
+
+      - name: Upload V-84 final APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MY-SHOP-V84-FINAL-APK
+          path: final_apk/MY-SHOP-V84.apk
+          if-no-files-found: error
+
+      - name: Final ONE APK guard
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          COUNT="$(
+            find "$GITHUB_WORKSPACE/final_apk" \
+              -type f \
+              -name "*.apk" \
+              | wc -l
+          )"
+
+          if [ "$COUNT" -ne 1 ]; then
+            echo "ERROR: Final output must contain exactly ONE APK."
+            exit 1
+          fi
+
+          echo "SUCCESS: Exactly ONE verified APK prepared."
