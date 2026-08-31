@@ -1,4 +1,4 @@
-name: V-81 MY SHOP FINAL RELEASE
+name: V-82 MY SHOP FINAL RELEASE
 
 on:
   workflow_dispatch:
@@ -11,14 +11,14 @@ permissions:
 
 env:
   PRIMARY_SOURCE_ZIP: V-77_MY_SHOP_FULL_SOURCE.zip
-  VERSION_CODE: "81"
-  VERSION_NAME: "2.9.81"
-  SOURCE_DIR: v81_source
-  APK_NAME: V-81-MY-SHOP-FINAL.apk
+  VERSION_CODE: "82"
+  VERSION_NAME: "2.9.82"
+  SOURCE_DIR: v82_source
+  APK_NAME: V-82-MY-SHOP-FINAL.apk
 
 jobs:
   build:
-    name: V-81 - SINGLE VERIFIED APK
+    name: V-82 - SINGLE VERIFIED APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -27,26 +27,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Require exactly one source input
+      - name: Select one official source ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          test -s "$PRIMARY_SOURCE_ZIP" || {
-            echo "::error::Missing source ZIP: $PRIMARY_SOURCE_ZIP"
-            exit 1
-          }
-
-          ZIP_COUNT="$(find . -maxdepth 1 -type f -name '*.zip' | wc -l)"
-
-          if [ "$ZIP_COUNT" -ne 1 ]; then
-            echo "::error::Expected exactly ONE source ZIP."
-            echo "Found: $ZIP_COUNT"
-            find . -maxdepth 1 -type f -name '*.zip' -print
+          if [ ! -f "$PRIMARY_SOURCE_ZIP" ]; then
+            echo "::error::Required source ZIP not found:"
+            echo "$PRIMARY_SOURCE_ZIP"
+            echo
+            echo "Available ZIP files:"
+            find . -maxdepth 1 -type f -name "*.zip" -print
             exit 1
           fi
 
-          echo "Exactly one source ZIP verified."
+          echo "Using ONLY:"
+          echo "$PRIMARY_SOURCE_ZIP"
 
       - name: Extract source
         shell: bash
@@ -57,6 +53,8 @@ jobs:
           mkdir -p "$SOURCE_DIR" release
 
           unzip -q "$PRIMARY_SOURCE_ZIP" -d "$SOURCE_DIR"
+
+          echo "Source extracted successfully."
 
       - name: Locate exactly one Android project
         id: project
@@ -92,6 +90,12 @@ jobs:
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "app_gradle=$APP_GRADLE" >> "$GITHUB_OUTPUT"
 
+          echo "Android project:"
+          echo "$ROOT"
+
+          echo "App Gradle:"
+          echo "$APP_GRADLE"
+
       - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
@@ -118,7 +122,7 @@ jobs:
         with:
           gradle-version: "8.11.1"
 
-      - name: Apply V-81 version
+      - name: Apply V-82 version
         shell: bash
         run: |
           set -euo pipefail
@@ -136,49 +140,56 @@ jobs:
           if path.suffix == ".kts":
               text = re.sub(
                   r'versionCode\s*=\s*\d+',
-                  'versionCode = 81',
+                  'versionCode = 82',
                   text
               )
 
               text = re.sub(
                   r'versionName\s*=\s*["\'][^"\']*["\']',
-                  'versionName = "2.9.81"',
+                  'versionName = "2.9.82"',
                   text
               )
+
           else:
               text = re.sub(
                   r'versionCode\s+\d+',
-                  'versionCode 81',
+                  'versionCode 82',
                   text
               )
 
               text = re.sub(
                   r'versionName\s+["\'][^"\']*["\']',
-                  'versionName "2.9.81"',
+                  'versionName "2.9.82"',
                   text
               )
 
           path.write_text(text, encoding="utf-8")
           PY
 
-      - name: Verify V-81 version
+          echo "V-82 version applied."
+
+      - name: Verify V-82 version
         shell: bash
         run: |
           set -euo pipefail
 
           APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
 
-          grep -Eq 'versionCode[[:space:]]*(=)?[[:space:]]*81' "$APP_GRADLE" || {
-            echo "::error::versionCode 81 not found."
-            exit 1
-          }
+          grep -Eq \
+            'versionCode[[:space:]]*(=)?[[:space:]]*82' \
+            "$APP_GRADLE" || {
+              echo "::error::versionCode 82 not found."
+              exit 1
+            }
 
-          grep -Eq 'versionName[[:space:]]*(=)?[[:space:]]*"2\.9\.81"' "$APP_GRADLE" || {
-            echo "::error::versionName 2.9.81 not found."
-            exit 1
-          }
+          grep -Eq \
+            'versionName[[:space:]]*(=)?[[:space:]]*"2\.9\.82"' \
+            "$APP_GRADLE" || {
+              echo "::error::versionName 2.9.82 not found."
+              exit 1
+            }
 
-          echo "V-81 VERSION CHECK PASSED"
+          echo "V-82 VERSION CHECK PASSED"
 
       - name: Prepare Gradle
         working-directory: ${{ steps.project.outputs.root }}
@@ -245,6 +256,9 @@ jobs:
 
           echo "APK=$GITHUB_WORKSPACE/release/$APK_NAME" >> "$GITHUB_OUTPUT"
 
+          echo "ONE APK FOUND:"
+          echo "${APK_FILES[0]}"
+
       - name: Verify APK exists
         shell: bash
         run: |
@@ -254,7 +268,7 @@ jobs:
 
           test -s "$APK"
 
-          echo "APK created successfully:"
+          echo "APK created:"
           ls -lh "$APK"
 
       - name: Verify APK signature
@@ -281,10 +295,14 @@ jobs:
 
           AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
 
-          PACKAGE="$("$AAPT" dump badging "$APK" | \
-            sed -n "s/^package: name='\([^']*\)'.*/\1/p" | head -n 1)"
+          PACKAGE="$(
+            "$AAPT" dump badging "$APK" |
+            sed -n "s/^package: name='\([^']*\)'.*/\1/p" |
+            head -n 1
+          )"
 
-          echo "Detected package: $PACKAGE"
+          echo "Detected package:"
+          echo "$PACKAGE"
 
           if [ "$PACKAGE" != "com.myshop.app" ]; then
             echo "::error::Wrong package name: $PACKAGE"
@@ -292,6 +310,24 @@ jobs:
           fi
 
           echo "PACKAGE CHECK PASSED"
+
+      - name: Verify launcher activity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="release/$APK_NAME"
+
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+
+          BADGING="$("$AAPT" dump badging "$APK")"
+
+          echo "$BADGING" | grep -q "launchable-activity" || {
+            echo "::error::No launchable activity found."
+            exit 1
+          }
+
+          echo "LAUNCHER ACTIVITY FOUND"
 
       - name: Verify exactly one final APK
         shell: bash
@@ -307,19 +343,20 @@ jobs:
           )"
 
           if [ "$COUNT" -ne 1 ]; then
-            echo "::error::Final APK count is $COUNT. Expected exactly 1."
+            echo "::error::Final APK count is $COUNT."
+            echo "Expected exactly ONE APK."
             exit 1
           fi
 
           test -s "release/$APK_NAME"
 
-          echo "FINAL V-81 CHECK PASSED"
+          echo "FINAL V-82 CHECK PASSED"
           echo "Exactly ONE APK exists."
 
-      - name: Upload V-81 final APK
+      - name: Upload V-82 final APK
         uses: actions/upload-artifact@v4
         with:
-          name: V-81-MY-SHOP-FINAL-APK
-          path: release/V-81-MY-SHOP-FINAL.apk
+          name: V-82-MY-SHOP-FINAL-APK
+          path: release/V-82-MY-SHOP-FINAL.apk
           if-no-files-found: error
           retention-days: 30
