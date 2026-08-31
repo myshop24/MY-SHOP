@@ -22,7 +22,6 @@ jobs:
     timeout-minutes: 45
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -105,7 +104,7 @@ jobs:
         with:
           gradle-version: "8.11.1"
 
-      - name: Apply V-78 version to app module
+      - name: Apply V-78 version
         shell: bash
         run: |
           set -euo pipefail
@@ -120,17 +119,30 @@ jobs:
           path = Path(sys.argv[1])
           text = path.read_text(encoding="utf-8")
 
-          text = re.sub(
-              r'versionCode\s*=?\s*\d+',
-              'versionCode 78',
-              text
-          )
+          if path.name.endswith(".kts"):
+              text = re.sub(
+                  r'versionCode\s*(?:=)?\s*\d+',
+                  'versionCode = 78',
+                  text
+              )
 
-          text = re.sub(
-              r'versionName\s*=?\s*["\'][^"\']+["\']',
-              'versionName "2.9.78"',
-              text
-          )
+              text = re.sub(
+                  r'versionName\s*(?:=)?\s*["\'][^"\']*["\']',
+                  'versionName = "2.9.78"',
+                  text
+              )
+          else:
+              text = re.sub(
+                  r'versionCode\s*(?:=)?\s*\d+',
+                  'versionCode 78',
+                  text
+              )
+
+              text = re.sub(
+                  r'versionName\s*(?:=)?\s*["\'][^"\']*["\']',
+                  'versionName "2.9.78"',
+                  text
+              )
 
           path.write_text(text, encoding="utf-8")
           PY
@@ -142,10 +154,44 @@ jobs:
 
           APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
 
-          echo "Checking V-78 version..."
+          echo "===== V-78 VERSION CHECK ====="
 
-          grep -n "versionCode" "$APP_GRADLE" || true
-          grep -n "versionName" "$APP_GRADLE" || true
+          grep -n "versionCode" "$APP_GRADLE" || {
+            echo "::error::versionCode not found."
+            exit 1
+          }
+
+          grep -n "versionName" "$APP_GRADLE" || {
+            echo "::error::versionName not found."
+            exit 1
+          }
+
+          grep -Eq 'versionCode[[:space:]]*(=)?[[:space:]]*78' "$APP_GRADLE" || {
+            echo "::error::versionCode is not 78."
+            exit 1
+          }
+
+          grep -Eq 'versionName[[:space:]]*(=)?[[:space:]]*"2\.9\.78"' "$APP_GRADLE" || {
+            echo "::error::versionName is not 2.9.78."
+            exit 1
+          }
+
+          echo "V-78 VERSION CHECK PASSED"
+
+      - name: Prepare Gradle
+        working-directory: ${{ steps.project.outputs.root }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            echo "Gradle wrapper found."
+            ./gradlew --version
+          else
+            echo "Gradle wrapper not found."
+            gradle --version
+          fi
 
       - name: Clean project
         working-directory: ${{ steps.project.outputs.root }}
@@ -153,7 +199,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          gradle clean --no-daemon
+          if [ -f "./gradlew" ]; then
+            ./gradlew clean --no-daemon
+          else
+            gradle clean --no-daemon
+          fi
 
       - name: Build release APK
         working-directory: ${{ steps.project.outputs.root }}
@@ -161,7 +211,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          gradle assembleRelease --no-daemon --stacktrace
+          if [ -f "./gradlew" ]; then
+            ./gradlew assembleRelease --no-daemon --stacktrace
+          else
+            gradle assembleRelease --no-daemon --stacktrace
+          fi
 
       - name: Find exactly one APK
         id: apk
@@ -215,15 +269,13 @@ jobs:
           fi
 
           echo "APK verification passed."
-
           ls -lh "$APK"
 
       - name: Upload V-78 final APK
         uses: actions/upload-artifact@v4
         with:
           name: MY-SHOP-V-78-FINAL-APK
-          path: |
-            release/MY_SHOP_V-78_FINAL.apk
+          path: release/MY_SHOP_V-78_FINAL.apk
           if-no-files-found: error
           retention-days: 30
 
@@ -242,5 +294,8 @@ jobs:
           test "$COUNT" -eq 1
           test -s "release/MY_SHOP_V-78_FINAL.apk"
 
+          echo "======================================"
           echo "FINAL V-78 CHECK PASSED"
           echo "Exactly ONE APK exists."
+          echo "MY_SHOP_V-78_FINAL.apk"
+          echo "======================================"
