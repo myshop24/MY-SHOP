@@ -1,4 +1,4 @@
-name: V-77 MY SHOP FINAL RELEASE
+name: V-78 MY SHOP FINAL RELEASE
 
 on:
   push:
@@ -10,14 +10,14 @@ permissions:
 
 env:
   PRIMARY_SOURCE_ZIP: V-77_MY_SHOP_FULL_SOURCE.zip
-  VERSION_NUMBER: "77"
-  VERSION_NAME: "2.9.77"
+  VERSION_NUMBER: "78"
+  VERSION_NAME: "2.9.78"
   PACKAGE_NAME: com.myshop.app
-  SOURCE_DIR: v77_source
+  SOURCE_DIR: v78_source
 
 jobs:
   build:
-    name: V-77 - SINGLE VERIFIED APK
+    name: V-78 - SINGLE VERIFIED APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -25,18 +25,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Require V-77 source only
+      - name: Require primary source only
         shell: bash
         run: |
           set -euo pipefail
           test -s "$PRIMARY_SOURCE_ZIP" || {
-            echo "::error::V-77 source ZIP not found: $PRIMARY_SOURCE_ZIP"
+            echo "::error::Primary source ZIP not found: $PRIMARY_SOURCE_ZIP"
             exit 1
           }
-          echo "V-77 source verified:"
-          ls -lh "$PRIMARY_SOURCE_ZIP"
 
-      - name: Extract V-77 source
+      - name: Extract source
         shell: bash
         run: |
           set -euo pipefail
@@ -49,33 +47,37 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           mapfile -t settings_files < <(
             find "$SOURCE_DIR" -type f \
               \( -name settings.gradle -o -name settings.gradle.kts \) \
               -not -path '*/build/*' | sort
           )
+
           if [ "${#settings_files[@]}" -ne 1 ]; then
             echo "::error::Expected exactly ONE Android project; found ${#settings_files[@]}"
             printf '%s\n' "${settings_files[@]:-<none>}"
             exit 1
           fi
+
           ROOT="$(dirname "${settings_files[0]}")"
+
           if [ -f "$ROOT/app/build.gradle" ]; then
             APP_GRADLE="$ROOT/app/build.gradle"
           elif [ -f "$ROOT/app/build.gradle.kts" ]; then
             APP_GRADLE="$ROOT/app/build.gradle.kts"
           else
-            echo "::error::App Gradle file not found."
+            echo "::error::Android app Gradle file not found."
             exit 1
           fi
+
           if [ ! -f "$ROOT/build.gradle" ] && [ ! -f "$ROOT/build.gradle.kts" ]; then
             echo "::error::Root Gradle file not found."
             exit 1
           fi
+
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "app_gradle=$APP_GRADLE" >> "$GITHUB_OUTPUT"
-          echo "Android project: $ROOT"
-          echo "Android app Gradle: $APP_GRADLE"
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -98,7 +100,7 @@ jobs:
         with:
           gradle-version: "8.11.1"
 
-      - name: Repair V-77 invalid reference resource
+      - name: Repair known invalid reference resource
         shell: bash
         run: |
           set -euo pipefail
@@ -108,59 +110,113 @@ jobs:
           if [ -f "$BAD" ]; then
             mkdir -p "$ROOT/reference_assets"
             mv "$BAD" "$ROOT/reference_assets/myshop_dashboard_reference.png"
-            echo "FIXED: invalid reference image moved out of Android res/"
-          else
-            echo "Reference image not present; nothing to repair."
+            echo "Known reference image moved out of Android res/."
           fi
 
-      - name: Apply V-77 version to app module only
+      - name: Apply V-78 version to app module
         shell: bash
         run: |
           set -euo pipefail
           APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
-          VERSION_CODE="$((77 * 10000 + GITHUB_RUN_NUMBER))"
-          VERSION_NAME="2.9.77"
+          VERSION_CODE="$((78 * 10000 + GITHUB_RUN_NUMBER))"
+          VERSION_NAME="2.9.78"
 
           python3 - "$APP_GRADLE" "$VERSION_NAME" "$VERSION_CODE" <<'PY'
           import re, sys
           from pathlib import Path
 
           p = Path(sys.argv[1])
-          vn, vc = sys.argv[2], sys.argv[3]
+          version_name = sys.argv[2]
+          version_code = sys.argv[3]
           s = p.read_text(encoding="utf-8")
 
-          if "com.android.application" not in s and 'id("com.android.application")' not in s:
+          if "com.android.application" not in s:
               raise SystemExit(f"Not an Android application module: {p}")
 
-          s, n1 = re.subn(
-              r'(\bversionCode\s*(?:=\s*)?)\d+',
-              lambda m: m.group(1) + vc,
-              s,
+          default = re.search(r"\bdefaultConfig\s*\{", s)
+          if not default:
+              raise SystemExit("defaultConfig block not found")
+
+          start = default.end()
+
+          # Find the matching closing brace of defaultConfig.
+          depth = 1
+          i = start
+          quote = None
+          escape = False
+          while i < len(s) and depth:
+              c = s[i]
+              if quote:
+                  if escape:
+                      escape = False
+                  elif c == "\\":
+                      escape = True
+                  elif c == quote:
+                      quote = None
+              else:
+                  if c in "\"'":
+                      quote = c
+                  elif c == "{":
+                      depth += 1
+                  elif c == "}":
+                      depth -= 1
+              i += 1
+
+          if depth:
+              raise SystemExit("Unbalanced defaultConfig block")
+
+          block = s[start:i-1]
+
+          # Handle both Groovy forms:
+          # versionCode 123
+          # versionCode = 123
+          code_re = re.compile(r"(\bversionCode\s*(?:=\s*)?)\d+")
+          name_re = re.compile(r"(\bversionName\s*(?:=\s*))([\"'])(.*?)(\2)")
+
+          block, code_count = code_re.subn(
+              lambda m: m.group(1) + version_code,
+              block,
               count=1
           )
 
-          s, n2 = re.subn(
-              r'(\bversionName\s*(?:=\s*))(["\'])(.*?)(\2)',
-              lambda m: m.group(1) + m.group(2) + vn + m.group(4),
-              s,
+          block, name_count = name_re.subn(
+              lambda m: m.group(1) + m.group(2) + version_name + m.group(4),
+              block,
               count=1
           )
 
-          if n1 != 1 or n2 != 1:
-              raise SystemExit("V-77 versionCode/versionName update failed")
+          if code_count == 0:
+              block = "\n        versionCode " + version_code + block
 
+          if name_count == 0:
+              block = "\n        versionName '" + version_name + "'" + block
+
+          s = s[:start] + block + s[i-1:]
           p.write_text(s, encoding="utf-8")
-          print(f"V-77 version applied: {vn} / {vc}")
+
+          print(f"V-78 version applied: {version_name} / {version_code}")
           PY
 
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+
+      - name: Verify V-78 version values
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
+
+          grep -Eq "versionCode[[:space:]]*(=)?[[:space:]]*${VERSION_CODE}" "$APP_GRADLE"
+          grep -Eq "versionName[[:space:]]*(=)?[[:space:]]*['\"]${VERSION_NAME}['\"]" "$APP_GRADLE"
+
+          echo "V-78 version verification PASSED."
 
       - name: Build release APK
         id: apk
         shell: bash
         run: |
           set -euo pipefail
+
           ROOT="${{ steps.project.outputs.root }}"
           cd "$ROOT"
 
@@ -183,7 +239,6 @@ jobs:
           fi
 
           echo "path=${apks[0]}" >> "$GITHUB_OUTPUT"
-          ls -lh "${apks[0]}"
 
       - name: Require permanent release signing key
         shell: bash
@@ -194,10 +249,26 @@ jobs:
           KEY_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          test -n "$KEYSTORE_B64" || { echo "::error::Missing MY_SHOP_RELEASE_KEYSTORE_B64"; exit 1; }
-          test -n "$STORE_PASSWORD" || { echo "::error::Missing MY_SHOP_RELEASE_STORE_PASSWORD"; exit 1; }
-          test -n "$KEY_ALIAS" || { echo "::error::Missing MY_SHOP_RELEASE_KEY_ALIAS"; exit 1; }
-          test -n "$KEY_PASSWORD" || { echo "::error::Missing MY_SHOP_RELEASE_KEY_PASSWORD"; exit 1; }
+
+          test -n "$KEYSTORE_B64" || {
+            echo "::error::Missing MY_SHOP_RELEASE_KEYSTORE_B64"
+            exit 1
+          }
+
+          test -n "$STORE_PASSWORD" || {
+            echo "::error::Missing MY_SHOP_RELEASE_STORE_PASSWORD"
+            exit 1
+          }
+
+          test -n "$KEY_ALIAS" || {
+            echo "::error::Missing MY_SHOP_RELEASE_KEY_ALIAS"
+            exit 1
+          }
+
+          test -n "$KEY_PASSWORD" || {
+            echo "::error::Missing MY_SHOP_RELEASE_KEY_PASSWORD"
+            exit 1
+          }
 
           printf '%s' "$KEYSTORE_B64" \
             | base64 --decode \
@@ -217,8 +288,8 @@ jobs:
 
           BT="$ANDROID_HOME/build-tools/35.0.0"
           UNSIGNED="${{ steps.apk.outputs.path }}"
-          ALIGNED="$RUNNER_TEMP/MY_SHOP_V77_ALIGNED.apk"
-          SIGNED="$RUNNER_TEMP/MY_SHOP_V77_FINAL_RELEASE.apk"
+          ALIGNED="$RUNNER_TEMP/MY_SHOP_V78_ALIGNED.apk"
+          SIGNED="$RUNNER_TEMP/MY_SHOP_V78_FINAL_RELEASE.apk"
 
           "$BT/zipalign" -f -p 4 "$UNSIGNED" "$ALIGNED"
 
@@ -238,7 +309,7 @@ jobs:
           BADGING="$("$BT/aapt2" dump badging "$SIGNED")"
           echo "$BADGING"
 
-          echo "$BADGING" | grep -Fq "versionName='2.9.77'"
+          echo "$BADGING" | grep -Fq "versionName='2.9.78'"
           echo "$BADGING" | grep -Fq "versionCode='$VERSION_CODE'"
           echo "$BADGING" | grep -Fq "package: name='com.myshop.app'"
 
@@ -250,27 +321,29 @@ jobs:
         run: |
           set -euo pipefail
 
-          FINAL="release/V-77 MY SHOP FINAL RELEASE.apk"
-          SHA="release/V-77 MY SHOP FINAL RELEASE.sha256"
+          FINAL="release/V-78 MY SHOP FINAL RELEASE.apk"
+          SHA="release/V-78 MY SHOP FINAL RELEASE.sha256"
 
           mkdir -p release
           cp "${{ steps.signed.outputs.signed_path }}" "$FINAL"
           sha256sum "$FINAL" > "$SHA"
 
-          test "$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')" -eq 1
+          APK_COUNT="$(
+            find release -maxdepth 1 -type f -name '*.apk' \
+              | wc -l | tr -d ' '
+          )"
+
+          test "$APK_COUNT" -eq 1
           test -s "$FINAL"
           test -s "$SHA"
 
-          ls -lh release
-          cat "$SHA"
-
-      - name: Upload V-77 final release
+      - name: Upload V-78 final release
         uses: actions/upload-artifact@v4
         with:
-          name: V-77-MY-SHOP-FINAL-RELEASE
+          name: V-78-MY-SHOP-FINAL-RELEASE
           path: |
-            release/V-77 MY SHOP FINAL RELEASE.apk
-            release/V-77 MY SHOP FINAL RELEASE.sha256
+            release/V-78 MY SHOP FINAL RELEASE.apk
+            release/V-78 MY SHOP FINAL RELEASE.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -278,10 +351,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')" -eq 1
-          test -s "release/V-77 MY SHOP FINAL RELEASE.apk"
 
-          echo "V-77: ONE VERIFIED APK READY"
-          echo "Version: 2.9.77"
+          test "$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')" -eq 1
+          test -s "release/V-78 MY SHOP FINAL RELEASE.apk"
+
+          echo "V-78: ONE VERIFIED APK READY"
+          echo "Version: 2.9.78"
           echo "Package: com.myshop.app"
           echo "APK count: 1"
