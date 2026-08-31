@@ -30,7 +30,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           test -s "$PRIMARY_SOURCE_ZIP" || {
             echo "::error::Missing source ZIP: $PRIMARY_SOURCE_ZIP"
             exit 1
@@ -40,10 +39,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf "$SOURCE_DIR" release
           mkdir -p "$SOURCE_DIR" release
-
           unzip -q "$PRIMARY_SOURCE_ZIP" -d "$SOURCE_DIR"
 
       - name: Locate exactly one Android project
@@ -88,9 +85,6 @@ jobs:
           REFERENCE_FILE="app/src/main/res/drawable/myshop_dashboard_reference.png"
 
           if [ -f "$REFERENCE_FILE" ]; then
-            echo "Removing non-build dashboard reference resource:"
-            echo "$REFERENCE_FILE"
-
             rm -f "$REFERENCE_FILE"
           fi
 
@@ -99,7 +93,53 @@ jobs:
             exit 1
           fi
 
-          echo "Dashboard reference resource check passed."
+      - name: Fix AccountStore SHA-256 exception
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="${{ steps.project.outputs.root }}"
+
+          mapfile -t ACCOUNT_FILES < <(
+            find "$ROOT" -type f -name "AccountStore.java" -not -path '*/build/*' | sort
+          )
+
+          if [ "${#ACCOUNT_FILES[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly ONE AccountStore.java"
+            printf '%s\n' "${ACCOUNT_FILES[@]:-<none>}"
+            exit 1
+          fi
+
+          ACCOUNT="${ACCOUNT_FILES[0]}"
+
+          python3 - "$ACCOUNT" <<'PY'
+          import sys
+          from pathlib import Path
+
+          p = Path(sys.argv[1])
+          s = p.read_text(encoding="utf-8")
+
+          old = 'return "sha256:" + sha256(canonicalAnswer(answer));'
+          new = (
+              'try {\n'
+              '              return "sha256:" + sha256(canonicalAnswer(answer));\n'
+              '          } catch (java.security.NoSuchAlgorithmException e) {\n'
+              '              throw new IllegalStateException("SHA-256 algorithm unavailable", e);\n'
+              '          }'
+          )
+
+          count = s.count(old)
+
+          if count != 1:
+              raise SystemExit(
+                  f"Expected exactly one AccountStore SHA-256 return statement; found {count}"
+              )
+
+          p.write_text(s.replace(old, new, 1), encoding="utf-8")
+          print(f"FIXED: {p}")
+          PY
+
+          grep -n -A4 -B2 "SHA-256 algorithm unavailable" "$ACCOUNT"
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -114,9 +154,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-
           sdkmanager \
             "platform-tools" \
             "platforms;android-35" \
@@ -143,24 +181,14 @@ jobs:
           text = path.read_text(encoding="utf-8")
 
           if path.name.endswith(".kts"):
-              text = re.sub(
-                  r'versionCode\s*(?:=)?\s*\d+',
-                  'versionCode = 78',
-                  text
-              )
-
+              text = re.sub(r'versionCode\s*(?:=)?\s*\d+', 'versionCode = 78', text)
               text = re.sub(
                   r'versionName\s*(?:=)?\s*["\'][^"\']*["\']',
                   'versionName = "2.9.78"',
                   text
               )
           else:
-              text = re.sub(
-                  r'versionCode\s*(?:=)?\s*\d+',
-                  'versionCode 78',
-                  text
-              )
-
+              text = re.sub(r'versionCode\s*(?:=)?\s*\d+', 'versionCode 78', text)
               text = re.sub(
                   r'versionName\s*(?:=)?\s*["\'][^"\']*["\']',
                   'versionName "2.9.78"',
@@ -177,27 +205,11 @@ jobs:
 
           APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
 
-          echo "===== V-78 VERSION CHECK ====="
+          grep -n "versionCode" "$APP_GRADLE"
+          grep -n "versionName" "$APP_GRADLE"
 
-          grep -n "versionCode" "$APP_GRADLE" || {
-            echo "::error::versionCode not found."
-            exit 1
-          }
-
-          grep -n "versionName" "$APP_GRADLE" || {
-            echo "::error::versionName not found."
-            exit 1
-          }
-
-          grep -Eq 'versionCode[[:space:]]*(=)?[[:space:]]*78' "$APP_GRADLE" || {
-            echo "::error::versionCode is not 78."
-            exit 1
-          }
-
-          grep -Eq 'versionName[[:space:]]*(=)?[[:space:]]*"2\.9\.78"' "$APP_GRADLE" || {
-            echo "::error::versionName is not 2.9.78."
-            exit 1
-          }
+          grep -Eq 'versionCode[[:space:]]*(=)?[[:space:]]*78' "$APP_GRADLE"
+          grep -Eq 'versionName[[:space:]]*(=)?[[:space:]]*"2\.9\.78"' "$APP_GRADLE"
 
           echo "V-78 VERSION CHECK PASSED"
 
@@ -209,10 +221,8 @@ jobs:
 
           if [ -f "./gradlew" ]; then
             chmod +x ./gradlew
-            echo "Gradle wrapper found."
             ./gradlew --version
           else
-            echo "Gradle wrapper not found."
             gradle --version
           fi
 
@@ -261,14 +271,11 @@ jobs:
           fi
 
           APK="${APK_FILES[0]}"
-
           mkdir -p "$GITHUB_WORKSPACE/release"
 
-          cp "$APK" \
-            "$GITHUB_WORKSPACE/release/MY_SHOP_V-78_FINAL.apk"
+          cp "$APK" "$GITHUB_WORKSPACE/release/MY_SHOP_V-78_FINAL.apk"
 
-          echo "apk=$GITHUB_WORKSPACE/release/MY_SHOP_V-78_FINAL.apk" \
-            >> "$GITHUB_OUTPUT"
+          echo "apk=$GITHUB_WORKSPACE/release/MY_SHOP_V-78_FINAL.apk" >> "$GITHUB_OUTPUT"
 
       - name: Verify APK
         shell: bash
@@ -276,14 +283,10 @@ jobs:
           set -euo pipefail
 
           APK="release/MY_SHOP_V-78_FINAL.apk"
-
           test -s "$APK"
 
           APK_COUNT="$(
-            find release \
-              -maxdepth 1 \
-              -type f \
-              -name "*.apk" | wc -l
+            find release -maxdepth 1 -type f -name "*.apk" | wc -l
           )"
 
           if [ "$APK_COUNT" -ne 1 ]; then
@@ -309,10 +312,7 @@ jobs:
           set -euo pipefail
 
           COUNT="$(
-            find release \
-              -maxdepth 1 \
-              -type f \
-              -name "*.apk" | wc -l
+            find release -maxdepth 1 -type f -name "*.apk" | wc -l
           )"
 
           test "$COUNT" -eq 1
