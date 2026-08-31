@@ -1,69 +1,133 @@
-name: V-72 MY SHOP FINAL RELEASE
+name: V-73 MY SHOP FINAL RELEASE
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
-  SOURCE_ZIP: MY-SHOP-V62-REAL-FIX-BACKEND-READY.zip
-  VERSION_NUMBER: "72"
-  VERSION_NAME: "2.9.72"
-  SOURCE_DIR: v72_source
+  SOURCE_ZIP: V-73_MY_SHOP_FULL_SOURCE.zip
+  VERSION_NUMBER: "73"
+  VERSION_NAME: "2.9.73"
+  SOURCE_DIR: v73_source
 
 jobs:
   build:
-    name: V-72 - SINGLE VERIFIED APK
+    name: V-73 - SINGLE VERIFIED APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify locked V-72 baseline source
+      - name: Verify V-73 source ZIP
         shell: bash
         run: |
           set -euo pipefail
-          test -s "$SOURCE_ZIP"
-          echo "Using locked V-72 baseline: $SOURCE_ZIP"
 
-      - name: Extract clean source
+          if [ ! -f "$SOURCE_ZIP" ]; then
+            echo "::error::Missing source ZIP: $SOURCE_ZIP"
+            echo "Files in repository:"
+            find . -maxdepth 2 -type f | sort
+            exit 1
+          fi
+
+          test -s "$SOURCE_ZIP"
+
+          echo "V-73 source ZIP found:"
+          ls -lh "$SOURCE_ZIP"
+
+      - name: Extract V-73 source
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf "$SOURCE_DIR" release
-          mkdir -p "$SOURCE_DIR" release
+
+          rm -rf "$SOURCE_DIR"
+          rm -rf release
+
+          mkdir -p "$SOURCE_DIR"
+          mkdir -p release
+
           unzip -q "$SOURCE_ZIP" -d "$SOURCE_DIR"
+
+          echo "Source extracted successfully."
 
       - name: Locate exactly one Android project
         id: project
         shell: bash
         run: |
           set -euo pipefail
+
           mapfile -t settings_files < <(
             find "$SOURCE_DIR" -type f \
-              \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
-              -not -path '*/build/*' | sort
+              \( \
+                -name "settings.gradle" \
+                -o -name "settings.gradle.kts" \
+              \) \
+              -not -path "*/build/*" \
+              | sort
           )
 
           if [ "${#settings_files[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one Android project; found ${#settings_files[@]}."
+            echo "::error::Expected exactly ONE Android project."
+            echo "Found: ${#settings_files[@]}"
             printf '%s\n' "${settings_files[@]:-<none>}"
             exit 1
           fi
 
           ROOT="$(dirname "${settings_files[0]}")"
-          test -f "$ROOT/gradlew"
-          test -f "$ROOT/build.gradle" || test -f "$ROOT/build.gradle.kts"
+
+          echo "Android project:"
+          echo "$ROOT"
+
+          test -f "$ROOT/settings.gradle" \
+            || test -f "$ROOT/settings.gradle.kts"
+
+          test -f "$ROOT/build.gradle" \
+            || test -f "$ROOT/build.gradle.kts"
+
+          test -f "$ROOT/app/build.gradle" \
+            || test -f "$ROOT/app/build.gradle.kts"
+
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Gradle wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="${{ steps.project.outputs.root }}"
+
+          test -f "$ROOT/gradlew" || {
+            echo "::error::gradlew is missing."
+            exit 1
+          }
+
+          test -f "$ROOT/gradlew.bat" || {
+            echo "::error::gradlew.bat is missing."
+            exit 1
+          }
+
+          test -f "$ROOT/gradle/wrapper/gradle-wrapper.properties" || {
+            echo "::error::gradle-wrapper.properties is missing."
+            exit 1
+          }
+
+          chmod +x "$ROOT/gradlew"
+
+          echo "Gradle wrapper verified."
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
           cache: gradle
 
       - name: Set up Android SDK
@@ -73,16 +137,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Apply V-72 version only
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Apply V-73 version
         shell: bash
         run: |
           set -euo pipefail
+
           ROOT="${{ steps.project.outputs.root }}"
 
-          python3 - "$ROOT" "$VERSION_NAME" "$((72 * 10000 + GITHUB_RUN_NUMBER))" <<'PY'
+          VERSION_CODE="$((73 * 10000 + GITHUB_RUN_NUMBER))"
+          VERSION_NAME="2.9.73"
+
+          python3 - "$ROOT" "$VERSION_NAME" "$VERSION_CODE" <<'PY'
           import re
           import sys
           from pathlib import Path
@@ -91,48 +164,80 @@ jobs:
           version_name = sys.argv[2]
           version_code = sys.argv[3]
 
-          files = sorted(root.rglob("build.gradle")) + sorted(root.rglob("build.gradle.kts"))
+          files = list(root.rglob("build.gradle"))
+          files += list(root.rglob("build.gradle.kts"))
+
           changed_code = False
           changed_name = False
 
-          for p in files:
-              text = p.read_text(encoding="utf-8")
+          for path in sorted(files):
 
-              if "com.android.application" not in text and "applicationId" not in text:
+              if "/build/" in str(path):
                   continue
 
-              new, n1 = re.subn(
+              text = path.read_text(encoding="utf-8")
+
+              if (
+                  "com.android.application" not in text
+                  and "applicationId" not in text
+              ):
+                  continue
+
+              new_text, n1 = re.subn(
                   r"(\bversionCode\s*(?:=\s*)?)\d+",
                   r"\g<1>" + version_code,
                   text,
-                  count=1,
+                  count=1
               )
 
-              new, n2 = re.subn(
+              new_text, n2 = re.subn(
                   r'(\bversionName\s*(?:=\s*)?)(["\'])(.*?)(\2)',
                   r"\g<1>\g<2>" + version_name + r"\g<4>",
-                  new,
-                  count=1,
+                  new_text,
+                  count=1
               )
 
-              if new != text:
-                  p.write_text(new, encoding="utf-8")
+              if new_text != text:
+                  path.write_text(
+                      new_text,
+                      encoding="utf-8"
+                  )
 
               changed_code |= bool(n1)
               changed_name |= bool(n2)
 
-          if not changed_code or not changed_name:
-              raise SystemExit("Could not safely apply V-72 version metadata.")
+          if not changed_code:
+              raise SystemExit(
+                  "Could not update versionCode."
+              )
 
-          print(f"Applied versionName={version_name}, versionCode={version_code}")
+          if not changed_name:
+              raise SystemExit(
+                  "Could not update versionName."
+              )
+
+          print(
+              f"V-73 version applied: "
+              f"{version_name} / {version_code}"
+          )
           PY
 
-      - name: Clean every previous APK output
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+
+      - name: Clean previous APK outputs
         shell: bash
         run: |
           set -euo pipefail
+
           ROOT="${{ steps.project.outputs.root }}"
-          find "$ROOT" -type d -path '*/build/outputs/apk' -prune -exec rm -rf {} + || true
+
+          find "$ROOT" \
+            -type d \
+            -path "*/build/outputs/apk" \
+            -prune \
+            -exec rm -rf {} + || true
+
           rm -rf release
           mkdir -p release
 
@@ -141,8 +246,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           ROOT="${{ steps.project.outputs.root }}"
+
           cd "$ROOT"
+
           chmod +x gradlew
 
           ./gradlew clean assembleRelease \
@@ -153,13 +261,17 @@ jobs:
 
           mapfile -t apks < <(
             find "$ROOT" -type f \
-              -path '*/build/outputs/apk/release/*.apk' \
-              -name '*.apk' | sort
+              -path "*/build/outputs/apk/release/*.apk" \
+              -name "*.apk" \
+              | sort
           )
 
+          echo "Release APK files:"
+          printf '%s\n' "${apks[@]:-<none>}"
+
           if [ "${#apks[@]}" -ne 1 ]; then
-            echo "::error::Exactly ONE release APK is required; found ${#apks[@]}."
-            printf '%s\n' "${apks[@]:-<none>}"
+            echo "::error::Exactly ONE release APK required."
+            echo "Found: ${#apks[@]}"
             exit 1
           fi
 
@@ -176,29 +288,32 @@ jobs:
           set -euo pipefail
 
           test -n "$KEYSTORE_B64" || {
-            echo "::error::Missing MY_SHOP_RELEASE_KEYSTORE_B64 secret."
+            echo "::error::Missing MY_SHOP_RELEASE_KEYSTORE_B64"
             exit 1
           }
 
           test -n "$STORE_PASSWORD" || {
-            echo "::error::Missing MY_SHOP_RELEASE_STORE_PASSWORD secret."
+            echo "::error::Missing MY_SHOP_RELEASE_STORE_PASSWORD"
             exit 1
           }
 
           test -n "$KEY_ALIAS" || {
-            echo "::error::Missing MY_SHOP_RELEASE_KEY_ALIAS secret."
+            echo "::error::Missing MY_SHOP_RELEASE_KEY_ALIAS"
             exit 1
           }
 
           test -n "$KEY_PASSWORD" || {
-            echo "::error::Missing MY_SHOP_RELEASE_KEY_PASSWORD secret."
+            echo "::error::Missing MY_SHOP_RELEASE_KEY_PASSWORD"
             exit 1
           }
 
-          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/myshop-release.jks"
+          printf '%s' "$KEYSTORE_B64" \
+            | base64 --decode \
+            > "$RUNNER_TEMP/myshop-release.jks"
+
           test -s "$RUNNER_TEMP/myshop-release.jks"
 
-      - name: Sign and verify with permanent key
+      - name: Sign and verify APK
         id: signed
         shell: bash
         env:
@@ -209,11 +324,17 @@ jobs:
           set -euo pipefail
 
           BT="$ANDROID_HOME/build-tools/35.0.0"
-          UNSIGNED="${{ steps.apk.outputs.path }}"
-          ALIGNED="$RUNNER_TEMP/MY_SHOP_V72-aligned.apk"
-          SIGNED="$RUNNER_TEMP/MY_SHOP_V72_FINAL_RELEASE.apk"
 
-          "$BT/zipalign" -f -p 4 "$UNSIGNED" "$ALIGNED"
+          UNSIGNED="${{ steps.apk.outputs.path }}"
+          ALIGNED="$RUNNER_TEMP/MY_SHOP_V73_ALIGNED.apk"
+          SIGNED="$RUNNER_TEMP/MY_SHOP_V73_FINAL_RELEASE.apk"
+
+          "$BT/zipalign" \
+            -f \
+            -p \
+            4 \
+            "$UNSIGNED" \
+            "$ALIGNED"
 
           "$BT/apksigner" sign \
             --ks "$RUNNER_TEMP/myshop-release.jks" \
@@ -223,16 +344,27 @@ jobs:
             --v1-signing-enabled true \
             --v2-signing-enabled true \
             --v3-signing-enabled true \
-            --out "$SIGNED" "$ALIGNED"
+            --out "$SIGNED" \
+            "$ALIGNED"
 
-          "$BT/apksigner" verify --verbose "$SIGNED"
+          "$BT/apksigner" verify \
+            --verbose \
+            "$SIGNED"
 
-          BADGING="$("$BT/aapt2" dump badging "$SIGNED")"
+          BADGING="$(
+            "$BT/aapt2" dump badging "$SIGNED"
+          )"
+
           echo "$BADGING"
 
-          echo "$BADGING" | grep -Fq "versionName='2.9.72'"
-          echo "$BADGING" | grep -Fq "versionCode='$((72 * 10000 + GITHUB_RUN_NUMBER))'"
-          echo "$BADGING" | grep -Fq "package: name='com.myshop.app'"
+          echo "$BADGING" \
+            | grep -Fq "versionName='2.9.73'"
+
+          echo "$BADGING" \
+            | grep -Fq "versionCode='$VERSION_CODE'"
+
+          echo "$BADGING" \
+            | grep -Fq "package: name='com.myshop.app'"
 
           echo "signed_path=$SIGNED" >> "$GITHUB_OUTPUT"
 
@@ -241,34 +373,63 @@ jobs:
         run: |
           set -euo pipefail
 
-          FINAL="release/V-72 MY SHOP FINAL RELEASE.apk"
+          FINAL="release/V-73 MY SHOP FINAL RELEASE.apk"
 
-          cp "${{ steps.signed.outputs.signed_path }}" "$FINAL"
-          sha256sum "$FINAL" > "release/V-72 MY SHOP FINAL RELEASE.sha256"
+          cp \
+            "${{ steps.signed.outputs.signed_path }}" \
+            "$FINAL"
 
-          APK_COUNT="$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')"
+          sha256sum \
+            "$FINAL" \
+            > "release/V-73 MY SHOP FINAL RELEASE.sha256"
+
+          APK_COUNT="$(
+            find release \
+              -maxdepth 1 \
+              -type f \
+              -name "*.apk" \
+              | wc -l \
+              | tr -d " "
+          )"
 
           test "$APK_COUNT" -eq 1
           test -s "$FINAL"
 
-          echo "===== V-72 FINAL ====="
+          echo "===== V-73 FINAL ====="
           ls -lh release
-          cat "release/V-72 MY SHOP FINAL RELEASE.sha256"
 
-      - name: Upload V-72 release
+          cat \
+            "release/V-73 MY SHOP FINAL RELEASE.sha256"
+
+      - name: Upload V-73 release
         uses: actions/upload-artifact@v4
         with:
-          name: V-72-MY-SHOP-FINAL-RELEASE
+          name: V-73-MY-SHOP-FINAL-RELEASE
           path: |
-            release/V-72 MY SHOP FINAL RELEASE.apk
-            release/V-72 MY SHOP FINAL RELEASE.sha256
+            release/V-73 MY SHOP FINAL RELEASE.apk
+            release/V-73 MY SHOP FINAL RELEASE.sha256
           if-no-files-found: error
           retention-days: 30
 
-      - name: Final one-APK guard
+      - name: Final ONE APK guard
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')" -eq 1
-          test -s "release/V-72 MY SHOP FINAL RELEASE.apk"
-          echo "V-72: ONE VERIFIED APK READY"
+
+          COUNT="$(
+            find release \
+              -maxdepth 1 \
+              -type f \
+              -name "*.apk" \
+              | wc -l \
+              | tr -d " "
+          )"
+
+          test "$COUNT" -eq 1
+
+          test -s \
+            "release/V-73 MY SHOP FINAL RELEASE.apk"
+
+          echo "====================================="
+          echo "V-73: ONE VERIFIED APK READY"
+          echo "====================================="
