@@ -1,4 +1,4 @@
-name: MY SHOP V-59 ONE RELEASE APK — FIXED SOURCE SELECTION
+name: MY SHOP V-62 FINAL RELEASE APK
 
 on:
   workflow_dispatch:
@@ -10,70 +10,53 @@ permissions:
   contents: read
 
 env:
-  SOURCE_DIR: v59_source
+  SOURCE_ZIP: MY-SHOP-V62-REAL-FIX-BACKEND-READY.zip
+  SOURCE_DIR: v62_source
 
 jobs:
   build:
-    name: MY SHOP V-59 - SINGLE VERIFIED RELEASE APK
+    name: MY SHOP V-62 - SINGLE VERIFIED RELEASE APK
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
-      # 1. SOURCE: exactly ONE valid V57/V58-era Android source ZIP
-      # ------------------------------------------------------------
-      - name: Locate exactly one valid MY SHOP source ZIP
-        id: source
+      - name: Verify V-62 source
         shell: bash
         run: |
           set -euo pipefail
-
-          # The repository currently contains two V-57 source archives:
-          #   V-57_MY_SHOP_CORRECTED_SOURCE.zip
-          #   V-57_MY_SHOP_CORRECTED_SOURCE_FIXED.zip
-          # They are both structurally valid, so a raw "exactly one" scan is
-          # ambiguous.  Use the FIXED archive as the authoritative source.
-          preferred=(
-            "./V-57_MY_SHOP_CORRECTED_SOURCE_FIXED.zip"
-            "./V-57_MY_SHOP_CORRECTED_SOURCE.zip"
-          )
-
-          chosen=""
-          for zip in "${preferred[@]}"; do
-            if [ -f "$zip" ]; then
-              if unzip -Z1 "$zip" | grep -Eq '(^|/)gradlew$' \
-                && unzip -Z1 "$zip" | grep -Eq '(^|/)settings\.gradle(\.kts)?$' \
-                && unzip -Z1 "$zip" | grep -Eq '(^|/)build\.gradle(\.kts)?$'; then
-                chosen="$zip"
-                break
-              fi
-            fi
-          done
-
-          if [ -z "$chosen" ]; then
-            echo "::error::No complete V-57 MY SHOP Android source archive was found."
-            echo "Expected one of:"
-            printf '  %s\n' "${preferred[@]}"
+          test -f "$SOURCE_ZIP" || {
+            echo "::error::Missing V-62 source: $SOURCE_ZIP"
             exit 1
-          fi
+          }
 
-          echo "Selected authoritative source: $chosen"
-          echo "chosen=$chosen" >> "$GITHUB_OUTPUT"
+          unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)gradlew$' || {
+            echo "::error::V-62 source missing gradlew"
+            exit 1
+          }
 
-      - name: Extract source
+          unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)settings\.gradle(\.kts)?$' || {
+            echo "::error::V-62 source missing settings.gradle(.kts)"
+            exit 1
+          }
+
+          unzip -Z1 "$SOURCE_ZIP" | grep -Eq '(^|/)build\.gradle(\.kts)?$' || {
+            echo "::error::V-62 source missing build.gradle(.kts)"
+            exit 1
+          }
+
+          echo "AUTHORITATIVE SOURCE: $SOURCE_ZIP"
+
+      - name: Extract V-62 source
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf "$SOURCE_DIR"
+          rm -rf "$SOURCE_DIR" release
           mkdir -p "$SOURCE_DIR"
-          unzip -q "${{ steps.source.outputs.chosen }}" -d "$SOURCE_DIR"
+          unzip -q "$SOURCE_ZIP" -d "$SOURCE_DIR"
 
-      # ------------------------------------------------------------
-      # 2. Locate exactly one Android project
-      # ------------------------------------------------------------
       - name: Locate exactly one Android project
         id: project
         shell: bash
@@ -87,18 +70,18 @@ jobs:
           )
 
           if [ "${#settings_files[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one settings.gradle(.kts). Found ${#settings_files[@]}."
+            echo "::error::Expected exactly ONE Android project. Found ${#settings_files[@]}."
             printf '%s\n' "${settings_files[@]:-<none>}"
             exit 1
           fi
 
-          root="$(dirname "${settings_files[0]}")"
+          ROOT="$(dirname "${settings_files[0]}")"
 
-          test -f "$root/gradlew"
-          test -f "$root/build.gradle" || test -f "$root/build.gradle.kts"
+          test -f "$ROOT/gradlew"
+          test -f "$ROOT/build.gradle" || test -f "$ROOT/build.gradle.kts"
 
-          echo "root=$root" >> "$GITHUB_OUTPUT"
-          echo "Android project root: $root"
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "ANDROID PROJECT: $ROOT"
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -120,32 +103,31 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      # ------------------------------------------------------------
-      # 3. Automatic V-59 version
-      # ------------------------------------------------------------
-      - name: Generate V-59 version
+      - name: Generate V-62 version
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION_CODE="$((590000 + GITHUB_RUN_NUMBER))"
-          VERSION_NAME="5.9.${GITHUB_RUN_NUMBER}"
+          VERSION_CODE="$((620000 + GITHUB_RUN_NUMBER))"
+          VERSION_NAME="2.9.62"
 
           echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
           echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
 
-          echo "V-59 VERSION_NAME=$VERSION_NAME"
-          echo "V-59 VERSION_CODE=$VERSION_CODE"
+          echo "V-62 VERSION_NAME=$VERSION_NAME"
+          echo "V-62 VERSION_CODE=$VERSION_CODE"
 
-      - name: Apply version to Android app
+      - name: Apply V-62 version
         shell: bash
         run: |
           set -euo pipefail
+
           ROOT="${{ steps.project.outputs.root }}"
 
           mapfile -t gradle_files < <(
             find "$ROOT" -type f \
-              \( -name 'build.gradle' -o -name 'build.gradle.kts' \) -print
+              \( -name 'build.gradle' -o -name 'build.gradle.kts' \) \
+              -print | sort
           )
 
           python3 - "$VERSION_CODE" "$VERSION_NAME" "${gradle_files[@]}" <<'PY'
@@ -165,10 +147,16 @@ jobs:
 
           for path in files:
               text = path.read_text(encoding="utf-8")
+
               if "com.android.application" not in text and "applicationId" not in text:
                   continue
 
-              new, n1 = code_re.subn(r'\g<1>' + version_code, text, count=1)
+              new, n1 = code_re.subn(
+                  r'\g<1>' + version_code,
+                  text,
+                  count=1
+              )
+
               new, n2 = name_re.subn(
                   r'\g<1>\g<2>' + version_name + r'\g<4>',
                   new,
@@ -177,6 +165,7 @@ jobs:
 
               if n1:
                   patched_code = True
+
               if n2:
                   patched_name = True
 
@@ -185,15 +174,15 @@ jobs:
 
           if not patched_code or not patched_name:
               raise SystemExit(
-                  "ERROR: Could not update both versionCode and versionName."
+                  "ERROR: V-62 versionCode/versionName could not be updated."
               )
 
-          print(f"Applied versionName={version_name}, versionCode={version_code}")
+          print(
+              f"Applied versionName={version_name}, "
+              f"versionCode={version_code}"
+          )
           PY
 
-      # ------------------------------------------------------------
-      # 4. Clean release build
-      # ------------------------------------------------------------
       - name: Clean previous APK outputs
         shell: bash
         run: |
@@ -202,98 +191,70 @@ jobs:
           rm -rf "$ROOT/app/build/outputs/apk"
           rm -rf release
 
-      - name: Build V-59 release APK
+      - name: Build V-62 release APK
+        id: apk
         shell: bash
         run: |
           set -euo pipefail
-          cd "${{ steps.project.outputs.root }}"
+
+          ROOT="${{ steps.project.outputs.root }}"
+          cd "$ROOT"
+
           chmod +x gradlew
+
           ./gradlew clean assembleRelease \
             --no-daemon \
             --no-build-cache \
             --rerun-tasks \
             --stacktrace
 
-      # ------------------------------------------------------------
-      # 5. HARD STOP if more than ONE APK exists
-      # ------------------------------------------------------------
-      - name: Locate exactly one release APK
-        id: apk
-        shell: bash
-        run: |
-          set -euo pipefail
-          ROOT="${{ steps.project.outputs.root }}"
-
           mapfile -t apks < <(
             find "$ROOT" -type f \
-              -path '*/build/outputs/apk/*.apk' \
+              -path '*/build/outputs/apk/release/*.apk' \
               -name '*.apk' | sort
           )
 
-          echo "APK files produced:"
+          echo "Release APK files:"
           printf '%s\n' "${apks[@]:-<none>}"
 
           if [ "${#apks[@]}" -ne 1 ]; then
-            echo "::error::BUILD REJECTED: exactly ONE release APK is required."
-            echo "Found ${#apks[@]} APK file(s)."
+            echo "::error::V-62 requires exactly ONE release APK."
             exit 1
           fi
 
-          case "${apks[0]}" in
-            */build/outputs/apk/release/*.apk) ;;
-            *)
-              echo "::error::BUILD REJECTED: APK is not from release output."
-              exit 1
-              ;;
-          esac
-
           echo "path=${apks[0]}" >> "$GITHUB_OUTPUT"
 
-      # ------------------------------------------------------------
-      # 6. Make a genuinely installable release APK
-      #    The previous V-59 attempt stopped here because the Gradle
-      #    release output was unsigned. A normal modern Android APK
-      #    does NOT need META-INF/MANIFEST.MF when it uses APK Signature
-      #    Scheme v2/v3. We therefore sign the final, zip-aligned APK
-      #    with a CI release key, then verify the real APK signature.
-      # ------------------------------------------------------------
-      - name: Sign and verify one release APK
-        id: signed_apk
+      - name: Sign and verify V-62 APK
+        id: signed
         shell: bash
         run: |
           set -euo pipefail
 
           UNSIGNED="${{ steps.apk.outputs.path }}"
           BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+
           APKSIGNER="$BUILD_TOOLS/apksigner"
           ZIPALIGN="$BUILD_TOOLS/zipalign"
           AAPT2="$BUILD_TOOLS/aapt2"
-          KEYSTORE="$RUNNER_TEMP/my-shop-v59-release.jks"
-          ALIGNED="$RUNNER_TEMP/my-shop-v59-aligned.apk"
-          SIGNED="$RUNNER_TEMP/MY_SHOP_V59_RELEASE_SIGNED.apk"
+
+          KEYSTORE="$RUNNER_TEMP/my-shop-v62-release.jks"
+          ALIGNED="$RUNNER_TEMP/my-shop-v62-aligned.apk"
+          SIGNED="$RUNNER_TEMP/MY_SHOP_V62_FINAL_RELEASE.apk"
 
           test -s "$UNSIGNED"
           test -x "$APKSIGNER"
           test -x "$ZIPALIGN"
           test -x "$AAPT2"
 
-          echo "===== RAW RELEASE APK ====="
-          file "$UNSIGNED"
-          unzip -t "$UNSIGNED" >/dev/null
-
-          # Generate an ephemeral signing key only when the source project
-          # did not already produce a signed APK. This guarantees that the
-          # artifact is installable instead of passing an unsigned APK to
-          # the phone.
           keytool -genkeypair -v \
             -keystore "$KEYSTORE" \
             -storepass changeit \
             -keypass changeit \
-            -alias myshopv59 \
+            -alias myshopv62 \
             -keyalg RSA \
             -keysize 2048 \
             -validity 10000 \
-            -dname "CN=MY SHOP V59, OU=Release, O=MY SHOP, C=US" \
+            -dname "CN=MY SHOP V62, OU=Release, O=MY SHOP, C=US" \
             >/dev/null 2>&1
 
           "$ZIPALIGN" -f -p 4 "$UNSIGNED" "$ALIGNED"
@@ -302,48 +263,38 @@ jobs:
             --ks "$KEYSTORE" \
             --ks-pass pass:changeit \
             --key-pass pass:changeit \
-            --ks-key-alias myshopv59 \
+            --ks-key-alias myshopv62 \
             --v1-signing-enabled true \
             --v2-signing-enabled true \
             --v3-signing-enabled true \
             --out "$SIGNED" \
             "$ALIGNED"
 
-          test -s "$SIGNED"
-          unzip -t "$SIGNED" >/dev/null
-
-          echo "===== APK SIGNATURE ====="
           "$APKSIGNER" verify --verbose --min-sdk-version 23 "$SIGNED"
 
-          echo "===== APK BADGING ====="
           BADGING="$("$AAPT2" dump badging "$SIGNED")"
           echo "$BADGING"
 
-          echo "$BADGING" | grep -Fq "package: name='com.myshop.app'" || {
-            echo "::error::Unexpected applicationId."
+          echo "$BADGING" | grep -Fq "versionName='$VERSION_NAME'" || {
+            echo "::error::V-62 versionName mismatch"
             exit 1
           }
 
           echo "$BADGING" | grep -Fq "versionCode='$VERSION_CODE'" || {
-            echo "::error::versionCode mismatch."
+            echo "::error::V-62 versionCode mismatch"
             exit 1
           }
 
-          echo "$BADGING" | grep -Fq "versionName='$VERSION_NAME'" || {
-            echo "::error::versionName mismatch."
+          echo "$BADGING" | grep -Fq "package: name='com.myshop.app'" || {
+            echo "::error::Unexpected applicationId"
             exit 1
           }
 
-          # Replace the unsigned Gradle output with the verified signed APK.
-          cp "$SIGNED" "$UNSIGNED"
-          echo "signed_path=$UNSIGNED" >> "$GITHUB_OUTPUT"
+          echo "signed_path=$SIGNED" >> "$GITHUB_OUTPUT"
 
-          echo "APK integrity + zip alignment + v1/v2/v3 signature + identity verification PASSED."
+          echo "V-62 APK SIGNATURE + VERSION + APPLICATION ID: PASS"
 
-      # ------------------------------------------------------------
-      # 7. Create ONLY ONE release APK + checksum
-      # ------------------------------------------------------------
-      - name: Prepare single release package
+      - name: Prepare ONE final V-62 APK
         shell: bash
         run: |
           set -euo pipefail
@@ -351,41 +302,51 @@ jobs:
           rm -rf release
           mkdir -p release
 
-          FINAL="release/MY_SHOP_V59_RELEASE.apk"
-          cp "${{ steps.signed_apk.outputs.signed_path }}" "$FINAL"
+          FINAL="release/MY_SHOP_V62_FINAL_RELEASE.apk"
+
+          cp "${{ steps.signed.outputs.signed_path }}" "$FINAL"
 
           test -s "$FINAL"
 
-          sha256sum "$FINAL" > release/MY_SHOP_V59_RELEASE.sha256
+          sha256sum "$FINAL" > release/MY_SHOP_V62_FINAL_RELEASE.sha256
 
-          # HARD GUARD: release folder may contain only one APK.
-          APK_COUNT="$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')"
+          APK_COUNT="$(
+            find release -maxdepth 1 -type f -name '*.apk' |
+            wc -l |
+            tr -d ' '
+          )"
+
           if [ "$APK_COUNT" -ne 1 ]; then
             echo "::error::Final release must contain exactly ONE APK."
             exit 1
           fi
 
-          echo "===== FINAL RELEASE ====="
           ls -lh release
-          echo
-          cat release/MY_SHOP_V59_RELEASE.sha256
+          cat release/MY_SHOP_V62_FINAL_RELEASE.sha256
 
-      - name: Upload ONE V-59 release APK
+      - name: Upload ONE V-62 release
         uses: actions/upload-artifact@v4
         with:
-          name: MY-SHOP-V59-ONE-RELEASE
+          name: MY-SHOP-V62-FINAL-RELEASE
           path: |
-            release/MY_SHOP_V59_RELEASE.apk
-            release/MY_SHOP_V59_RELEASE.sha256
+            release/MY_SHOP_V62_FINAL_RELEASE.apk
+            release/MY_SHOP_V62_FINAL_RELEASE.sha256
           if-no-files-found: error
           retention-days: 30
 
-      - name: Final success guard
+      - name: Final V-62 success guard
         shell: bash
         run: |
           set -euo pipefail
-          APK_COUNT="$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')"
+
+          APK_COUNT="$(
+            find release -maxdepth 1 -type f -name '*.apk' |
+            wc -l |
+            tr -d ' '
+          )"
+
           test "$APK_COUNT" -eq 1
-          test -s release/MY_SHOP_V59_RELEASE.apk
-          test -s release/MY_SHOP_V59_RELEASE.sha256
-          echo "MY SHOP V-59: ONE VALID RELEASE APK READY."
+          test -s release/MY_SHOP_V62_FINAL_RELEASE.apk
+          test -s release/MY_SHOP_V62_FINAL_RELEASE.sha256
+
+          echo "MY SHOP V-62 FINAL RELEASE: PASS"
