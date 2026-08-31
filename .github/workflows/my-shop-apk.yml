@@ -1,23 +1,28 @@
-name: V-85 MY SHOP FINAL RELEASE
+name: V-90 MY SHOP FINAL RELEASE
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: read
 
+concurrency:
+  group: my-shop-v90-build
+  cancel-in-progress: true
+
 env:
-  PRIMARY_SOURCE_ZIP: MY_SHOP_V-85_FULL_PROJECT_SOURCE.zip
-  VERSION_NUMBER: "85"
-  VERSION_NAME: "2.9.85"
-  PACKAGE_NAME: com.myshop.app
-  SOURCE_DIR: v85_source
+  PRIMARY_SOURCE_ZIP: "V-90_MY_SHOP_FULL_PROJECT_SOURCE.zip"
+  VERSION_NUMBER: "90"
+  VERSION_NAME: "2.9.90"
+  PACKAGE_NAME: "com.myshop.app"
+  SOURCE_DIR: "v90_source"
 
 jobs:
   build:
-    name: V-85 - SINGLE VERIFIED APK
+    name: V-90 - SINGLE VERIFIED APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -26,136 +31,199 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Require V-85 source input
+      - name: Lock repository to EXACT V-90 source
         shell: bash
         run: |
           set -euo pipefail
 
-          test -s "$PRIMARY_SOURCE_ZIP" || {
-            echo "::error::Missing source ZIP: $PRIMARY_SOURCE_ZIP"
+          mapfile -t SOURCE_ZIPS < <(
+            find . -maxdepth 1 -type f \
+              -name 'V-*_MY_SHOP_FULL_PROJECT_SOURCE.zip' \
+              | sort
+          )
+
+          if [ "${#SOURCE_ZIPS[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly ONE MY SHOP master source ZIP."
+            echo "Found:"
+            printf '%s\n' "${SOURCE_ZIPS[@]:-<none>}"
             exit 1
-          }
+          fi
 
-          echo "V-85 source found:"
-          echo "$PRIMARY_SOURCE_ZIP"
+          ACTUAL_SOURCE="$(basename "${SOURCE_ZIPS[0]}")"
 
-      - name: Extract V-85 source
+          if [ "$ACTUAL_SOURCE" != "$PRIMARY_SOURCE_ZIP" ]; then
+            echo "::error::Wrong source ZIP detected."
+            echo "Expected: $PRIMARY_SOURCE_ZIP"
+            echo "Found:    $ACTUAL_SOURCE"
+            exit 1
+          fi
+
+          test -s "$PRIMARY_SOURCE_ZIP"
+
+          echo "======================================"
+          echo "V-90 SOURCE LOCK PASSED"
+          echo "Source: $PRIMARY_SOURCE_ZIP"
+          echo "SHA256:"
+          sha256sum "$PRIMARY_SOURCE_ZIP"
+          echo "======================================"
+
+      - name: Extract clean V-90 source
         shell: bash
         run: |
           set -euo pipefail
 
           rm -rf "$SOURCE_DIR" release
-          mkdir -p "$SOURCE_DIR" release
+
+          mkdir -p "$SOURCE_DIR"
+          mkdir -p release
 
           unzip -q "$PRIMARY_SOURCE_ZIP" -d "$SOURCE_DIR"
 
-      - name: Locate exactly one Android project
+      - name: Locate exactly ONE Android project
         id: project
         shell: bash
         run: |
           set -euo pipefail
 
-          mapfile -t settings_files < <(
+          mapfile -t SETTINGS_FILES < <(
             find "$SOURCE_DIR" -type f \
-              \( -name settings.gradle -o -name settings.gradle.kts \) \
-              -not -path '*/build/*' | sort
+              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+              -not -path '*/build/*' \
+              | sort
           )
 
-          if [ "${#settings_files[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly ONE Android project; found ${#settings_files[@]}"
-            printf '%s\n' "${settings_files[@]:-<none>}"
+          if [ "${#SETTINGS_FILES[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly ONE Android project."
+            echo "Found: ${#SETTINGS_FILES[@]}"
+            printf '%s\n' "${SETTINGS_FILES[@]:-<none>}"
             exit 1
           fi
 
-          ROOT="$(dirname "${settings_files[0]}")"
+          ROOT="$(dirname "${SETTINGS_FILES[0]}")"
 
           if [ -f "$ROOT/app/build.gradle" ]; then
             APP_GRADLE="$ROOT/app/build.gradle"
           elif [ -f "$ROOT/app/build.gradle.kts" ]; then
             APP_GRADLE="$ROOT/app/build.gradle.kts"
           else
-            echo "::error::app Gradle file not found"
+            echo "::error::App Gradle file not found."
             exit 1
           fi
 
+          MANIFEST="$ROOT/app/src/main/AndroidManifest.xml"
+
+          test -s "$MANIFEST"
+
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "app_gradle=$APP_GRADLE" >> "$GITHUB_OUTPUT"
+          echo "manifest=$MANIFEST" >> "$GITHUB_OUTPUT"
 
-      - name: Harden launcher and repair known build issues
+          echo "Android root: $ROOT"
+          echo "App Gradle: $APP_GRADLE"
+          echo "Manifest: $MANIFEST"
+
+      - name: Verify V-90 source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="${{ steps.project.outputs.root }}"
+          APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
+          MANIFEST="${{ steps.project.outputs.manifest }}"
+
+          grep -Eq \
+            "applicationId[[:space:]]*['\"]com\.myshop\.app['\"]" \
+            "$APP_GRADLE"
+
+          grep -Eq \
+            "versionCode[[:space:]]+90" \
+            "$APP_GRADLE"
+
+          grep -Eq \
+            "versionName[[:space:]]+['\"]2\.9\.90['\"]" \
+            "$APP_GRADLE"
+
+          grep -Fq \
+            'android:name=".LoginActivity"' \
+            "$MANIFEST"
+
+          grep -Fq \
+            'android:name="android.intent.action.MAIN"' \
+            "$MANIFEST"
+
+          grep -Fq \
+            'android:name="android.intent.category.LAUNCHER"' \
+            "$MANIFEST"
+
+          grep -Fq \
+            'android:exported="true"' \
+            "$MANIFEST"
+
+          LOGIN="$ROOT/app/src/main/java/com/myshop/app/LoginActivity.java"
+
+          test -s "$LOGIN"
+
+          echo "V-90 SOURCE IDENTITY VERIFIED"
+
+      - name: Verify dashboard source exists
         shell: bash
         run: |
           set -euo pipefail
 
           ROOT="${{ steps.project.outputs.root }}"
 
-          BAD="$ROOT/app/src/main/res/drawable/myshop_dashboard_reference.png"
-          rm -f "$BAD"
+          MAIN="$ROOT/app/src/main/java/com/myshop/app/MainActivity.java"
 
-          LOGIN="$ROOT/app/src/main/java/com/myshop/app/LoginActivity.java"
+          test -s "$MAIN"
 
-          test -f "$LOGIN"
+          grep -Fq "fitDashboardToScreen" "$MAIN"
+          grep -Fq "buildDashboard" "$MAIN"
 
-          python3 - "$LOGIN" <<'PY'
-          from pathlib import Path
-          import sys
+          test -s \
+            "$ROOT/app/src/main/res/drawable/myshop_dashboard_reference.png"
 
-          p = Path(sys.argv[1])
-          s = p.read_text(encoding="utf-8")
+          test -s \
+            "$ROOT/app/src/main/res/drawable/myshop_dashboard_header.png"
 
-          s = s.replace(
-              "import androidx.appcompat.app.AppCompatActivity;\n",
-              ""
-          )
+          echo "V-90 DASHBOARD BASELINE VERIFIED"
 
-          s = s.replace(
-              "public class LoginActivity extends AppCompatActivity {",
-              "public class LoginActivity extends android.app.Activity {"
-          )
+      - name: Verify permanent signing secrets
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.MY_SHOP_RELEASE_KEYSTORE_B64 }}
+          STORE_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MY_SHOP_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
 
-          p.write_text(s, encoding="utf-8")
-          PY
-
-          grep -Fq \
-            'public class LoginActivity extends android.app.Activity' \
-            "$LOGIN"
-
-          mapfile -t ACCOUNT_FILES < <(
-            find "$ROOT" -type f \
-              -name AccountStore.java \
-              -not -path '*/build/*' | sort
-          )
-
-          if [ "${#ACCOUNT_FILES[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly ONE AccountStore.java"
-            printf '%s\n' "${ACCOUNT_FILES[@]:-<none>}"
+          test -n "$KEYSTORE_B64" || {
+            echo "::error::Permanent keystore secret missing."
             exit 1
-          fi
+          }
 
-          ACCOUNT="${ACCOUNT_FILES[0]}"
+          test -n "$STORE_PASSWORD" || {
+            echo "::error::Keystore password missing."
+            exit 1
+          }
 
-          python3 - "$ACCOUNT" <<'PY'
-          from pathlib import Path
-          import sys
+          test -n "$KEY_ALIAS" || {
+            echo "::error::Key alias missing."
+            exit 1
+          }
 
-          p = Path(sys.argv[1])
-          s = p.read_text(encoding="utf-8")
+          test -n "$KEY_PASSWORD" || {
+            echo "::error::Key password missing."
+            exit 1
+          }
 
-          old = 'return "sha256:" + sha256(canonicalAnswer(answer));'
+          printf '%s' "$KEYSTORE_B64" \
+            | base64 --decode \
+            > "$RUNNER_TEMP/myshop-release.jks"
 
-          if old in s:
-              new = (
-                  'try {\n'
-                  '    return "sha256:" + sha256(canonicalAnswer(answer));\n'
-                  '} catch (java.security.NoSuchAlgorithmException e) {\n'
-                  '    throw new IllegalStateException('
-                  '"SHA-256 algorithm unavailable", e);\n'
-                  '}'
-              )
+          test -s "$RUNNER_TEMP/myshop-release.jks"
 
-              s = s.replace(old, new, 1)
-
-          p.write_text(s, encoding="utf-8")
-          PY
+          echo "PERMANENT SIGNING KEY VERIFIED"
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -183,7 +251,7 @@ jobs:
         with:
           gradle-version: "8.11.1"
 
-      - name: Apply and verify V-85 version
+      - name: Apply and verify V-90 version
         shell: bash
         run: |
           set -euo pipefail
@@ -199,22 +267,22 @@ jobs:
           s = p.read_text(encoding="utf-8")
 
           s, n1 = re.subn(
-              r'(\bversionCode\s*(?:=\s*)?)\d+',
-              r'\g<1>85',
+              r'(\bversionCode\s+)\d+',
+              r'\g<1>90',
               s,
               count=1
           )
 
           s, n2 = re.subn(
-              r'(\bversionName\s*(?:=\s*)?)["\'][^"\']*["\']',
-              r"\g<1>'2.9.85'",
+              r'(\bversionName\s+)[\'"][^\'"]*[\'"]',
+              r"\g<1>'2.9.90'",
               s,
               count=1
           )
 
           if n1 != 1 or n2 != 1:
               raise SystemExit(
-                  f"Version replacement failed: "
+                  f"V-90 version replacement failed: "
                   f"versionCode={n1}, versionName={n2}"
               )
 
@@ -222,42 +290,15 @@ jobs:
           PY
 
           grep -Eq \
-            'versionCode[[:space:]]*(=)?[[:space:]]*85' \
+            'versionCode[[:space:]]+90' \
             "$APP_GRADLE"
 
           grep -Eq \
-            'versionName[[:space:]]*(=)?[[:space:]]*["'\'']2\.9\.85["'\'']' \
+            "versionName[[:space:]]+['\"]2\.9\.90['\"]" \
             "$APP_GRADLE"
 
-          echo "V-85 VERSION VERIFIED"
-          echo "versionCode = 85"
-          echo "versionName = 2.9.85"
-
-      - name: Verify launcher manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ROOT="${{ steps.project.outputs.root }}"
-          MANIFEST="$ROOT/app/src/main/AndroidManifest.xml"
-
-          test -s "$MANIFEST"
-
-          grep -Fq \
-            'android:name=".LoginActivity"' \
-            "$MANIFEST"
-
-          grep -Fq \
-            'android:name="android.intent.action.MAIN"' \
-            "$MANIFEST"
-
-          grep -Fq \
-            'android:name="android.intent.category.LAUNCHER"' \
-            "$MANIFEST"
-
-          grep -Fq \
-            'android:exported="true"' \
-            "$MANIFEST"
+          echo "VERSION CODE = 90"
+          echo "VERSION NAME = 2.9.90"
 
       - name: Build release APK
         id: apk
@@ -265,6 +306,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          rm -rf app/build/outputs/apk/release
 
           if [ -f ./gradlew ]; then
             chmod +x ./gradlew
@@ -282,42 +325,23 @@ jobs:
               --stacktrace
           fi
 
-          mapfile -t apks < <(
+          mapfile -t APKS < <(
             find app/build/outputs/apk/release \
               -type f \
-              -name "*.apk" | sort
+              -name "*.apk" \
+              | sort
           )
 
-          if [ "${#apks[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly ONE release APK; found ${#apks[@]}"
-            printf '%s\n' "${apks[@]:-<none>}"
+          if [ "${#APKS[@]}" -ne 1 ]; then
+            echo "::error::Expected EXACTLY ONE release APK."
+            echo "Found: ${#APKS[@]}"
+            printf '%s\n' "${APKS[@]:-<none>}"
             exit 1
           fi
 
-          echo "path=${apks[0]}" >> "$GITHUB_OUTPUT"
+          echo "path=${APKS[0]}" >> "$GITHUB_OUTPUT"
 
-      - name: Require permanent release signing key
-        shell: bash
-        env:
-          KEYSTORE_B64: ${{ secrets.MY_SHOP_RELEASE_KEYSTORE_B64 }}
-          STORE_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.MY_SHOP_RELEASE_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-
-          test -n "$KEYSTORE_B64"
-          test -n "$STORE_PASSWORD"
-          test -n "$KEY_ALIAS"
-          test -n "$KEY_PASSWORD"
-
-          printf '%s' "$KEYSTORE_B64" \
-            | base64 --decode \
-            > "$RUNNER_TEMP/myshop-release.jks"
-
-          test -s "$RUNNER_TEMP/myshop-release.jks"
-
-      - name: Sign and verify V-85 APK
+      - name: Sign V-90 APK with permanent key
         id: signed
         shell: bash
         env:
@@ -330,8 +354,8 @@ jobs:
           BT="$ANDROID_HOME/build-tools/35.0.0"
 
           UNSIGNED="${{ steps.apk.outputs.path }}"
-          ALIGNED="$RUNNER_TEMP/MY_SHOP_V85_ALIGNED.apk"
-          SIGNED="$RUNNER_TEMP/MY_SHOP_V85_FINAL.apk"
+          ALIGNED="$RUNNER_TEMP/MY_SHOP_V90_ALIGNED.apk"
+          SIGNED="$RUNNER_TEMP/MY_SHOP_V90_FINAL.apk"
 
           "$BT/zipalign" \
             -f -p 4 \
@@ -355,30 +379,30 @@ jobs:
 
           echo "$BADGING"
 
-          echo "$BADGING" \
-            | grep -Fq "package: name='com.myshop.app'"
+          echo "$BADGING" | grep -Fq \
+            "package: name='com.myshop.app'"
 
-          echo "$BADGING" \
-            | grep -Fq "versionName='2.9.85'"
+          echo "$BADGING" | grep -Fq \
+            "versionName='2.9.90'"
 
-          echo "$BADGING" \
-            | grep -Fq "versionCode='85'"
+          echo "$BADGING" | grep -Fq \
+            "versionCode='90'"
 
-          echo "$BADGING" \
-            | grep -Fq \
+          echo "$BADGING" | grep -Fq \
             "launchable-activity: name='com.myshop.app.LoginActivity'"
 
           echo "signed_path=$SIGNED" >> "$GITHUB_OUTPUT"
 
-      - name: Prepare exactly ONE final APK
+      - name: Prepare exactly ONE V-90 APK
         shell: bash
         run: |
           set -euo pipefail
 
-          FINAL="release/V-85 MY SHOP FINAL RELEASE.apk"
-          SHA="release/V-85 MY SHOP FINAL RELEASE.sha256"
-
+          rm -rf release
           mkdir -p release
+
+          FINAL="release/V-90 MY SHOP FINAL RELEASE.apk"
+          SHA="release/V-90 MY SHOP FINAL RELEASE.sha256"
 
           cp \
             "${{ steps.signed.outputs.signed_path }}" \
@@ -386,19 +410,26 @@ jobs:
 
           sha256sum "$FINAL" > "$SHA"
 
-          test "$(
+          COUNT="$(
             find release \
               -maxdepth 1 \
               -type f \
               -name "*.apk" \
               | wc -l \
               | tr -d " "
-          )" -eq 1
+          )"
 
+          test "$COUNT" -eq 1
           test -s "$FINAL"
           test -s "$SHA"
 
-      - name: Runtime launch smoke test
+          echo "FINAL APK:"
+          ls -lh "$FINAL"
+
+          echo "CHECKSUM:"
+          cat "$SHA"
+
+      - name: Runtime launch and dashboard smoke test
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
@@ -407,63 +438,113 @@ jobs:
           profile: Pixel_6
           emulator-options: -no-window -no-audio -no-boot-anim
           disable-animations: true
+
           script: |
             set -euo pipefail
 
-            APK="release/V-85 MY SHOP FINAL RELEASE.apk"
+            APK="release/V-90 MY SHOP FINAL RELEASE.apk"
 
-            adb install -r "$APK"
+            adb uninstall "$PACKAGE_NAME" \
+              >/dev/null 2>&1 || true
+
+            adb install "$APK"
 
             adb shell am force-stop "$PACKAGE_NAME"
 
             adb shell am start -W \
               -n "$PACKAGE_NAME/.LoginActivity"
 
-            sleep 3
+            sleep 5
 
-            if adb shell pidof "$PACKAGE_NAME" >/dev/null 2>&1; then
-              echo "RUNTIME LAUNCH PASSED"
-            else
-              echo "::error::RUNTIME LAUNCH FAILED"
+            PID="$(adb shell pidof "$PACKAGE_NAME" || true)"
 
-              adb logcat -d -t 1000 \
+            if [ -z "$PID" ]; then
+              echo "::error::MY SHOP failed to remain running after launch."
+
+              adb logcat -d -t 2000 \
                 | grep -E \
-                'AndroidRuntime|FATAL EXCEPTION|com.myshop.app' \
+                "AndroidRuntime|FATAL EXCEPTION|com.myshop.app" \
                 || true
 
               exit 1
             fi
 
-      - name: Upload V-85 final release
+            echo "LOGIN LAUNCH PASSED"
+
+            adb shell am start -W \
+              -n "$PACKAGE_NAME/.MainActivity" \
+              || {
+                echo "::error::Dashboard activity failed to launch."
+
+                adb logcat -d -t 2000 \
+                  | grep -E \
+                  "AndroidRuntime|FATAL EXCEPTION|com.myshop.app" \
+                  || true
+
+                exit 1
+              }
+
+            sleep 5
+
+            PID="$(adb shell pidof "$PACKAGE_NAME" || true)"
+
+            if [ -z "$PID" ]; then
+              echo "::error::MY SHOP dashboard did not remain running."
+
+              adb logcat -d -t 2500 \
+                | grep -E \
+                "AndroidRuntime|FATAL EXCEPTION|com.myshop.app" \
+                || true
+
+              exit 1
+            fi
+
+            echo "DASHBOARD LAUNCH PASSED"
+            echo "V-90 RUNTIME SMOKE TEST PASSED"
+
+      - name: Upload ONLY V-90 APK
         uses: actions/upload-artifact@v4
         with:
-          name: V-85-MY-SHOP-FINAL-RELEASE
-          path: |
-            release/V-85 MY SHOP FINAL RELEASE.apk
-            release/V-85 MY SHOP FINAL RELEASE.sha256
+          name: V-90-MY-SHOP-FINAL-RELEASE
+          path: release/V-90 MY SHOP FINAL RELEASE.apk
           if-no-files-found: error
           retention-days: 30
 
-      - name: Final ONE APK guard
+      - name: Upload V-90 checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: V-90-MY-SHOP-CHECKSUM
+          path: release/V-90 MY SHOP FINAL RELEASE.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Final V-90 guard
         shell: bash
         run: |
           set -euo pipefail
 
-          test "$(
+          COUNT="$(
             find release \
               -maxdepth 1 \
               -type f \
               -name "*.apk" \
               | wc -l \
               | tr -d " "
-          )" -eq 1
+          )"
 
-          test -s "release/V-85 MY SHOP FINAL RELEASE.apk"
+          test "$COUNT" -eq 1
+
+          test -s \
+            "release/V-90 MY SHOP FINAL RELEASE.apk"
+
+          test -s \
+            "release/V-90 MY SHOP FINAL RELEASE.sha256"
 
           echo "======================================"
-          echo "FINAL V-85 CHECK PASSED"
+          echo "V-90 FINAL CHECK PASSED"
           echo "Exactly ONE signed APK exists."
-          echo "Version: 2.9.85"
-          echo "Version Code: 85"
+          echo "Version: 2.9.90"
+          echo "Version Code: 90"
           echo "Package: com.myshop.app"
+          echo "Source: V-90_MY_SHOP_FULL_PROJECT_SOURCE.zip"
           echo "======================================"
