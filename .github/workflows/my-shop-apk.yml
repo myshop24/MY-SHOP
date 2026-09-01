@@ -15,39 +15,30 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Find latest V ZIP
-        shell: bash
         run: |
           set -e
-
           best=""
-          bestver=-1
+          ver=-1
 
           for f in V-*.zip V_*.zip; do
             [ -f "$f" ] || continue
-
             if [[ "$f" =~ ^V[-_]([0-9]+)-.*\.zip$ ]]; then
-              v=$((10#${BASH_REMATCH[1]}))
-
-              if [ "$v" -gt "$bestver" ]; then
-                bestver=$v
+              n=$((10#${BASH_REMATCH[1]}))
+              if [ "$n" -gt "$ver" ]; then
+                ver=$n
                 best="$f"
               fi
             fi
           done
 
-          [ -n "$best" ] || {
-            echo "ERROR: No V-XX ZIP found."
-            exit 1
-          }
+          [ -n "$best" ] || exit 1
 
           echo "SOURCE_ZIP=$best" >> "$GITHUB_ENV"
-          echo "SOURCE_VERSION=$bestver" >> "$GITHUB_ENV"
+          echo "SOURCE_VERSION=$ver" >> "$GITHUB_ENV"
 
-          echo "Selected: $best"
-          echo "Version: V-$bestver"
+          echo "Using: $best"
 
       - name: Extract source
-        shell: bash
         run: |
           set -e
           rm -rf source
@@ -55,7 +46,6 @@ jobs:
           unzip -q "$SOURCE_ZIP" -d source
 
       - name: Find Android project
-        shell: bash
         run: |
           set -e
 
@@ -63,57 +53,60 @@ jobs:
             \( -name settings.gradle -o -name settings.gradle.kts \) \
             | head -1 | xargs -r dirname)
 
-          [ -n "$PROJECT" ] || {
-            echo "ERROR: Android project not found."
-            exit 1
-          }
+          [ -n "$PROJECT" ] || exit 1
 
           echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
-          echo "Project: $PROJECT"
 
-      - name: Verify version
-        shell: bash
+      - name: Fix BuildConfig
         run: |
           set -e
 
-          GRADLE="$PROJECT/app/build.gradle"
+          FILE="$PROJECT/app/build.gradle"
 
-          [ -f "$GRADLE" ] || {
-            echo "ERROR: app/build.gradle not found."
-            exit 1
-          }
+          python3 - "$FILE" <<'PY'
+          import sys
+          import re
 
-          CODE=$(sed -n 's/.*versionCode[[:space:]]*\([0-9]*\).*/\1/p' "$GRADLE" | head -1)
-          NAME=$(sed -n "s/.*versionName[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" "$GRADLE" | head -1)
+          p = sys.argv[1]
+          s = open(p, encoding="utf-8").read()
 
-          echo "ZIP Version : V-$SOURCE_VERSION"
-          echo "Code        : $CODE"
-          echo "Name        : $NAME"
+          field = re.compile(
+              r'^\s*buildConfigField\s+.*MYSHOP_BACKEND_URL.*$\n?',
+              re.MULTILINE
+          )
 
-          [ "$CODE" = "$SOURCE_VERSION" ] || {
-            echo "ERROR: ZIP version and versionCode do not match."
-            exit 1
-          }
+          match = field.search(s)
 
-          [ -n "$NAME" ] || {
-            echo "ERROR: versionName not found."
-            exit 1
-          }
+          if match:
+              line = match.group(0).strip()
+              s = s[:match.start()] + s[match.end():]
+          else:
+              line = """buildConfigField 'String', 'MYSHOP_BACKEND_URL', '"' + backendUrl.replace('\\\\','\\\\\\\\').replace('\\"','\\\\\\"') + '"'"""
 
-      - name: Prepare Android build
-        shell: bash
-        run: |
-          set -e
+          if "buildFeatures { buildConfig true }" not in s:
+              s = s.replace(
+                  "android {",
+                  "android {\n    buildFeatures { buildConfig true }",
+                  1
+              )
 
-          GRADLE="$PROJECT/app/build.gradle"
+          marker = "        versionName"
+          pos = s.find(marker)
 
-          if ! grep -q "buildFeatures" "$GRADLE"; then
-            sed -i '0,/android[[:space:]]*{/s//android {\n    buildFeatures { buildConfig true }/' "$GRADLE"
-          fi
+          if pos == -1:
+              raise SystemExit("versionName not found")
 
-          echo "BuildConfig enabled."
+          end = s.find("\n", pos)
 
-          grep -n "buildFeatures" "$GRADLE" || true
+          s = s[:end + 1] + "        " + line + "\n" + s[end + 1:]
+
+          open(p, "w", encoding="utf-8").write(s)
+
+          print("BuildConfig fixed.")
+          PY
+
+          echo "----- build.gradle -----"
+          sed -n '1,30p' "$FILE"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -137,11 +130,8 @@ jobs:
 
       - name: Build APK
         working-directory: ${{ env.PROJECT }}
-        shell: bash
         run: |
           set -e
-
-          rm -rf app/build
 
           gradle clean :app:assembleDebug --no-daemon
 
@@ -151,8 +141,7 @@ jobs:
           )
 
           [ "${#APKs[@]}" -eq 1 ] || {
-            echo "ERROR: Expected exactly ONE APK."
-            printf '%s\n' "${APKs[@]}"
+            echo "ERROR: APK count is not 1"
             exit 1
           }
 
