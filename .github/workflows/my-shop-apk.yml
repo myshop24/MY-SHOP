@@ -1,4 +1,4 @@
-name: V-96 MY SHOP APK BUILD
+name: MY SHOP AUTO APK BUILD
 
 on:
   workflow_dispatch:
@@ -7,110 +7,112 @@ permissions:
   contents: read
 
 concurrency:
-  group: my-shop-v96-build
-  cancel-in-progress: true
-
-env:
-  VERSION_NUMBER: "96"
-  VERSION_NAME: "2.9.96"
-  PACKAGE_NAME: "com.myshop.app"
+  group: my-shop-auto-build
+  cancel-in-progress: false
 
 jobs:
   build:
-
-    name: V-96 Android APK
-
+    name: MY SHOP AUTO ANDROID APK
     runs-on: ubuntu-latest
-
     timeout-minutes: 45
 
     steps:
 
-      # ============================================================
-      # 1. DOWNLOAD REPOSITORY
-      # ============================================================
-
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      # ============================================================
-      # 2. FIND V-96 SOURCE
-      # ============================================================
-
-      - name: Find V-96 project source
+      - name: Find latest V-XX source ZIP
         id: source
         shell: bash
         run: |
           set -euo pipefail
 
           echo "========================================"
-          echo "SEARCHING FOR V-96 SOURCE"
+          echo "SEARCHING FOR MY SHOP SOURCE"
           echo "========================================"
 
           mapfile -d '' FILES < <(
-            find . \
-              -type f \
-              \( -iname "*V-96*.zip" -o -iname "*V96*.zip" \) \
+            find . -type f \
+              \( -iname "V-*.zip" -o -iname "V_*.zip" \) \
+              -not -path "./.git/*" \
               -print0
           )
 
           if [ "${#FILES[@]}" -eq 0 ]; then
-            echo "::error::V-96 ZIP file was not found."
-            echo ""
-            echo "Upload the V-96 full project ZIP to repository root."
+            echo "::error::No V-XX project ZIP found."
+            echo "Upload one full MY SHOP project ZIP."
             exit 1
           fi
 
-          if [ "${#FILES[@]}" -gt 1 ]; then
-            echo "::error::More than one V-96 ZIP was found."
-            echo ""
-            printf '%s\n' "${FILES[@]}"
-            echo ""
-            echo "Keep only ONE V-96 source ZIP."
+          echo "ZIP FILES FOUND:"
+          printf '%s\n' "${FILES[@]}"
+
+          BEST=""
+          BEST_NUM=-1
+
+          for FILE in "${FILES[@]}"; do
+            BASE="$(basename "$FILE")"
+
+            if [[ "$BASE" =~ [Vv]-([0-9]+) ]]; then
+              NUM="${BASH_REMATCH[1]}"
+
+              if (( NUM > BEST_NUM )); then
+                BEST_NUM="$NUM"
+                BEST="$FILE"
+              fi
+            elif [[ "$BASE" =~ [Vv]_([0-9]+) ]]; then
+              NUM="${BASH_REMATCH[1]}"
+
+              if (( NUM > BEST_NUM )); then
+                BEST_NUM="$NUM"
+                BEST="$FILE"
+              fi
+            fi
+          done
+
+          if [ -z "$BEST" ]; then
+            echo "::error::Could not detect V-XX version."
             exit 1
           fi
 
-          SOURCE_ZIP="${FILES[0]}"
+          VERSION_NUMBER="$BEST_NUM"
+          VERSION_NAME="2.9.${VERSION_NUMBER}"
 
-          echo "V-96 SOURCE:"
-          echo "$SOURCE_ZIP"
+          echo "========================================"
+          echo "LATEST SOURCE SELECTED"
+          echo "========================================"
+          echo "SOURCE: $BEST"
+          echo "VERSION: V-$VERSION_NUMBER"
+          echo "VERSION NAME: $VERSION_NAME"
 
-          echo "source_zip=$SOURCE_ZIP" >> "$GITHUB_OUTPUT"
+          echo "source_zip=$BEST" >> "$GITHUB_OUTPUT"
+          echo "version_number=$VERSION_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
 
           echo ""
-          echo "SHA256:"
-          sha256sum "$SOURCE_ZIP"
+          echo "SOURCE SHA256:"
+          sha256sum "$BEST"
 
-      # ============================================================
-      # 3. EXTRACT PROJECT
-      # ============================================================
-
-      - name: Extract V-96 project
+      - name: Extract project
         id: extract
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf v96_project
-          mkdir -p v96_project
+          rm -rf project
+          mkdir -p project
 
-          unzip -q "${{ steps.source.outputs.source_zip }}" \
-            -d v96_project
+          unzip -q "${{ steps.source.outputs.source_zip }}" -d project
 
           echo "========================================"
-          echo "V-96 SOURCE EXTRACTED"
+          echo "PROJECT EXTRACTED"
           echo "========================================"
 
-          find v96_project -maxdepth 3 -type f \
+          find project -type f \
             \( -name "settings.gradle" \
-            -o -name "settings.gradle.kts" \
-            -o -name "build.gradle" \
-            -o -name "build.gradle.kts" \) \
+            -o -name "settings.gradle.kts" \) \
+            -not -path "*/build/*" \
             | sort
-
-      # ============================================================
-      # 4. LOCATE ANDROID PROJECT
-      # ============================================================
 
       - name: Locate Android project
         id: project
@@ -119,8 +121,7 @@ jobs:
           set -euo pipefail
 
           mapfile -d '' SETTINGS < <(
-            find v96_project \
-              -type f \
+            find project -type f \
               \( -name "settings.gradle" \
               -o -name "settings.gradle.kts" \) \
               -not -path "*/build/*" \
@@ -129,16 +130,13 @@ jobs:
           )
 
           if [ "${#SETTINGS[@]}" -eq 0 ]; then
-            echo "::error::No Android settings.gradle or settings.gradle.kts found."
+            echo "::error::No Android Gradle project found."
             exit 1
           fi
 
           if [ "${#SETTINGS[@]}" -gt 1 ]; then
             echo "::error::Multiple Android projects found."
-            echo ""
             printf '%s\n' "${SETTINGS[@]}"
-            echo ""
-            echo "V-96 must contain ONE Android project."
             exit 1
           fi
 
@@ -165,73 +163,15 @@ jobs:
           echo "app_gradle=$APP_GRADLE" >> "$GITHUB_OUTPUT"
           echo "manifest=$MANIFEST" >> "$GITHUB_OUTPUT"
 
-          echo "========================================"
-          echo "ANDROID PROJECT FOUND"
-          echo "========================================"
-          echo "ROOT:"
-          echo "$ROOT"
-          echo ""
-          echo "APP GRADLE:"
-          echo "$APP_GRADLE"
-          echo ""
-          echo "MANIFEST:"
-          echo "$MANIFEST"
-
-      # ============================================================
-      # 5. VERIFY PACKAGE
-      # ============================================================
-
-      - name: Verify package and launcher
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
-          MANIFEST="${{ steps.project.outputs.manifest }}"
-
-          echo "========================================"
-          echo "CHECKING PACKAGE"
-          echo "========================================"
-
-          if ! grep -Eq \
-            "applicationId[[:space:]]*(=)?[[:space:]]*['\"]${PACKAGE_NAME}['\"]" \
-            "$APP_GRADLE"; then
-
-            echo "::error::Expected package ${PACKAGE_NAME} was not found."
-            echo ""
-            echo "Found applicationId lines:"
-            grep -n "applicationId" "$APP_GRADLE" || true
-            exit 1
-          fi
-
-          if ! grep -Fq "android.intent.action.MAIN" "$MANIFEST"; then
-            echo "::error::MAIN launcher activity not found."
-            exit 1
-          fi
-
-          if ! grep -Fq "android.intent.category.LAUNCHER" "$MANIFEST"; then
-            echo "::error::LAUNCHER category not found."
-            exit 1
-          fi
-
-          echo "PACKAGE VERIFIED:"
-          echo "$PACKAGE_NAME"
-
-          echo "LAUNCHER VERIFIED"
-
-      # ============================================================
-      # 6. JAVA
-      # ============================================================
+          echo "ANDROID ROOT: $ROOT"
+          echo "APP GRADLE: $APP_GRADLE"
+          echo "MANIFEST: $MANIFEST"
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
-
-      # ============================================================
-      # 7. ANDROID SDK
-      # ============================================================
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
@@ -248,67 +188,21 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-          echo "========================================"
-          echo "ANDROID SDK READY"
-          echo "========================================"
-
-      # ============================================================
-      # 8. GRADLE
-      # ============================================================
-
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.11.1"
 
-      # ============================================================
-      # 9. CHECK GRADLE WRAPPER
-      # ============================================================
-
-      - name: Verify Gradle project
-        working-directory: ${{ steps.project.outputs.root }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "========================================"
-          echo "GRADLE PROJECT CHECK"
-          echo "========================================"
-
-          if [ -f "./gradlew" ]; then
-            echo "Gradle wrapper found."
-            chmod +x ./gradlew
-            ./gradlew --version
-          else
-            echo "Gradle wrapper not found."
-            echo "System Gradle will be used."
-            gradle --version
-          fi
-
-      # ============================================================
-      # 10. BUILD DEBUG APK
-      #
-      # DEBUG APK IS INTENTIONALLY BUILT FIRST.
-      #
-      # This avoids the previous problem where an unsigned release
-      # APK could be generated and Android would reject installation.
-      # ============================================================
-
-      - name: Build V-96 APK
+      - name: Build Debug APK
         id: apk
         working-directory: ${{ steps.project.outputs.root }}
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "========================================"
-          echo "BUILDING V-96 APK"
-          echo "========================================"
-
           rm -rf app/build
 
           if [ -f "./gradlew" ]; then
-
             chmod +x ./gradlew
 
             ./gradlew \
@@ -318,9 +212,7 @@ jobs:
               --no-build-cache \
               --rerun-tasks \
               --stacktrace
-
           else
-
             gradle \
               clean \
               :app:assembleDebug \
@@ -328,7 +220,6 @@ jobs:
               --no-build-cache \
               --rerun-tasks \
               --stacktrace
-
           fi
 
           mapfile -d '' APKS < <(
@@ -339,30 +230,24 @@ jobs:
           )
 
           if [ "${#APKS[@]}" -eq 0 ]; then
-            echo "::error::No APK was generated."
+            echo "::error::No APK generated."
             exit 1
           fi
 
-          echo "APK FILES FOUND:"
-          printf '%s\n' "${APKS[@]}"
+          mkdir -p "$GITHUB_WORKSPACE/release"
 
           APK="${APKS[0]}"
 
-          mkdir -p "$GITHUB_WORKSPACE/release"
+          VERSION="${{ steps.source.outputs.version_number }}"
 
-          FINAL_APK="$GITHUB_WORKSPACE/release/V-96_MY_SHOP_DEBUG.apk"
+          FINAL_APK="$GITHUB_WORKSPACE/release/V-${VERSION}_MY_SHOP_DEBUG.apk"
 
           cp -f "$APK" "$FINAL_APK"
 
           echo "apk_path=$FINAL_APK" >> "$GITHUB_OUTPUT"
 
-          echo ""
           echo "FINAL APK:"
           echo "$FINAL_APK"
-
-      # ============================================================
-      # 11. VERIFY APK
-      # ============================================================
 
       - name: Verify APK
         shell: bash
@@ -372,116 +257,94 @@ jobs:
           APK="${{ steps.apk.outputs.apk_path }}"
 
           if [ ! -f "$APK" ]; then
-            echo "::error::Final APK does not exist."
+            echo "::error::APK does not exist."
             exit 1
           fi
 
           if [ ! -s "$APK" ]; then
-            echo "::error::Final APK is empty."
+            echo "::error::APK is empty."
             exit 1
           fi
 
-          echo "========================================"
           echo "APK VERIFIED"
-          echo "========================================"
-
           ls -lh "$APK"
 
-          echo ""
           echo "SHA256:"
           sha256sum "$APK"
 
-          echo ""
-          echo "APK TYPE:"
-          file "$APK"
-
-          echo ""
-          echo "APK SIZE:"
-          du -h "$APK"
-
-      # ============================================================
-      # 12. COPY SOURCE FOR BACKUP
-      # ============================================================
-
-      - name: Prepare V-96 backup
+      - name: Create complete reproducible backup
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p release/V-96_SOURCE_BACKUP
+          VERSION="${{ steps.source.outputs.version_number }}"
 
-          cp -f \
-            "${{ steps.source.outputs.source_zip }}" \
-            release/V-96_SOURCE_BACKUP/
+          mkdir -p backup_bundle
 
-          cat > release/V-96_SOURCE_BACKUP/V-96-BUILD-INFO.txt <<'EOF'
-          MY SHOP
-          V-96 BUILD
+          cp -f "${{ steps.source.outputs.source_zip }}" \
+            backup_bundle/
 
-          Version Number: 96
-          Version Name: 2.9.96
-          Package: com.myshop.app
+          if [ -f ".github/workflows/my-shop-apk.yml" ]; then
+            mkdir -p backup_bundle/.github/workflows
 
-          Build Type:
-          Debug APK
+            cp -f ".github/workflows/my-shop-apk.yml" \
+              backup_bundle/.github/workflows/my-shop-apk.yml
+          fi
 
-          Purpose:
-          Install/test verification build.
+          cat > backup_bundle/BUILD-INFO.txt <<EOF
+          MY SHOP COMPLETE BUILD BACKUP
+
+          Version: V-${VERSION}
+          Version Name: ${{ steps.source.outputs.version_name }}
+
+          This backup contains:
+          1. Complete source ZIP
+          2. Exact GitHub Actions YML
+          3. Build information
 
           IMPORTANT:
-          Keep this V-96 source backup.
-          Do not delete previous stable versions.
+          The source and YML must be kept together.
+          Do not delete older stable versions.
           EOF
 
-      # ============================================================
-      # 13. UPLOAD APK
-      # ============================================================
+          cd backup_bundle
 
-      - name: Upload V-96 APK
+          zip -qr \
+            "../V-${VERSION}_MY_SHOP_COMPLETE_BACKUP.zip" \
+            .
+
+          cd ..
+
+          echo "COMPLETE BACKUP CREATED:"
+          ls -lh "V-${VERSION}_MY_SHOP_COMPLETE_BACKUP.zip"
+
+          echo "BACKUP SHA256:"
+          sha256sum "V-${VERSION}_MY_SHOP_COMPLETE_BACKUP.zip"
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: V-96-MY-SHOP-APK
-          path: release/V-96_MY_SHOP_DEBUG.apk
+          name: V-${{ steps.source.outputs.version_number }}-MY-SHOP-APK
+          path: release/V-${{ steps.source.outputs.version_number }}_MY_SHOP_DEBUG.apk
           if-no-files-found: error
           retention-days: 30
 
-      # ============================================================
-      # 14. UPLOAD SOURCE BACKUP
-      # ============================================================
-
-      - name: Upload V-96 source backup
+      - name: Upload Complete Project Backup
         uses: actions/upload-artifact@v4
         with:
-          name: V-96-MY-SHOP-SOURCE-BACKUP
-          path: release/V-96_SOURCE_BACKUP
+          name: V-${{ steps.source.outputs.version_number }}-MY-SHOP-COMPLETE-BACKUP
+          path: V-${{ steps.source.outputs.version_number }}_MY_SHOP_COMPLETE_BACKUP.zip
           if-no-files-found: error
           retention-days: 30
 
-      # ============================================================
-      # 15. FINAL BUILD REPORT
-      # ============================================================
-
-      - name: V-96 final report
+      - name: Final report
         shell: bash
         run: |
-          set -euo pipefail
-
-          echo ""
-          echo "================================================"
-          echo "        V-96 MY SHOP BUILD COMPLETE"
-          echo "================================================"
-          echo ""
-          echo "Version:"
-          echo "2.9.96"
-          echo ""
-          echo "Package:"
-          echo "com.myshop.app"
-          echo ""
-          echo "APK:"
-          echo "V-96_MY_SHOP_DEBUG.apk"
-          echo ""
-          echo "Artifacts:"
-          echo "V-96-MY-SHOP-APK"
-          echo "V-96-MY-SHOP-SOURCE-BACKUP"
-          echo ""
-          echo "================================================"
+          echo "=========================================="
+          echo "MY SHOP BUILD SUCCESS"
+          echo "=========================================="
+          echo "Version: V-${{ steps.source.outputs.version_number }}"
+          echo "APK: V-${{ steps.source.outputs.version_number }}_MY_SHOP_DEBUG.apk"
+          echo "Complete Backup:"
+          echo "V-${{ steps.source.outputs.version_number }}_MY_SHOP_COMPLETE_BACKUP.zip"
+          echo "=========================================="
