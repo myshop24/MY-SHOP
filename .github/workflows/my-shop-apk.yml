@@ -1,318 +1,167 @@
-name: MY SHOP V-101 DASHBOARD TEST BUILD
+name: MY SHOP AUTO BUILD
 
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - main
-
-concurrency:
-  group: my-shop-v101-build
-  cancel-in-progress: true
-
-env:
-  VERSION_CODE: "101"
-  VERSION_NAME: "2.9.101"
-  PACKAGE_NAME: "com.myshop.app"
-  SOURCE_ZIP: "V-101-MY-SHOP-FULL-MASTER.zip"
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:
-    name: V-101 MY SHOP ZIP BUILD
+    name: MY SHOP BUILD
     runs-on: ubuntu-latest
 
     steps:
-
-      # --------------------------------------------------
-      # 1. Checkout repository
-      # --------------------------------------------------
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
-      # 2. Find EXACT V-101 ZIP
-      # --------------------------------------------------
-      - name: Find exact V-101 source ZIP
+      - name: Find latest V ZIP
         shell: bash
         run: |
           set -e
 
-          echo "Searching for exact source:"
-          echo "${SOURCE_ZIP}"
+          files=()
+          for f in V-*.zip V_*.zip; do
+            [ -f "$f" ] && files+=("$f")
+          done
 
-          ZIP_PATH="$(find . -type f -name "${SOURCE_ZIP}" -print -quit)"
-
-          if [ -z "$ZIP_PATH" ]; then
-            echo "ERROR: ${SOURCE_ZIP} was not found."
-            echo ""
-            echo "Available V-100/V-101 ZIP files:"
-            find . -type f \( -name 'V-100*.zip' -o -name 'V-101*.zip' \) -print || true
+          [ ${#files[@]} -gt 0 ] || {
+            echo "ERROR: No V-XX ZIP found."
             exit 1
-          fi
+          }
 
-          echo "FOUND:"
-          echo "$ZIP_PATH"
+          best=""
+          bestver=-1
 
-          echo "SOURCE_ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
+          for f in "${files[@]}"; do
+            if [[ "$f" =~ ^V[-_]([0-9]+)-.*\.zip$ ]]; then
+              v=$((10#${BASH_REMATCH[1]}))
+              if [ "$v" -gt "$bestver" ]; then
+                bestver=$v
+                best="$f"
+              fi
+            fi
+          done
 
-      # --------------------------------------------------
-      # 3. Prepare clean build directory
-      # --------------------------------------------------
-      - name: Prepare V-101 source
+          [ -n "$best" ] || {
+            echo "ERROR: Invalid V-XX ZIP name."
+            exit 1
+          }
+
+          echo "SOURCE_ZIP=$best" >> "$GITHUB_ENV"
+          echo "SOURCE_VERSION=$bestver" >> "$GITHUB_ENV"
+
+          echo "Selected: $best"
+          echo "Version: V-$bestver"
+
+      - name: Extract source
+        shell: bash
+        run: |
+          set -e
+          rm -rf source
+          mkdir source
+          unzip -q "$SOURCE_ZIP" -d source
+
+      - name: Find Android project
         shell: bash
         run: |
           set -e
 
-          rm -rf "$GITHUB_WORKSPACE/v101_source"
-          mkdir -p "$GITHUB_WORKSPACE/v101_source"
+          PROJECT=$(find source -type f \
+            \( -name settings.gradle -o -name settings.gradle.kts \) \
+            | head -1 | xargs -r dirname)
 
-          echo "Extracting exact V-101 ZIP..."
-          unzip -q "$SOURCE_ZIP_PATH" -d "$GITHUB_WORKSPACE/v101_source"
-
-          echo "Checking extracted project..."
-
-          test -f "$GITHUB_WORKSPACE/v101_source/settings.gradle" || {
-            echo "ERROR: settings.gradle not found."
-            find "$GITHUB_WORKSPACE/v101_source" -maxdepth 3 -type f | head -100
+          [ -n "$PROJECT" ] || {
+            echo "ERROR: Android project not found."
             exit 1
           }
 
-          test -f "$GITHUB_WORKSPACE/v101_source/app/build.gradle" || {
-            echo "ERROR: app/build.gradle not found."
-            exit 1
-          }
+          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
+          echo "Project: $PROJECT"
 
-          test -f "$GITHUB_WORKSPACE/v101_source/app/src/main/java/com/myshop/app/MainActivity.java" || {
-            echo "ERROR: V-101 MainActivity.java not found."
-            exit 1
-          }
-
-          echo "V-101 source extraction OK."
-
-      # --------------------------------------------------
-      # 4. Verify exact version
-      # --------------------------------------------------
-      - name: Verify V-101 source integrity
+      - name: Verify version
         shell: bash
-        working-directory: v101_source
         run: |
           set -e
 
-          echo "Checking versionCode..."
-          grep -q 'versionCode 101' app/build.gradle
+          GRADLE="$PROJECT/app/build.gradle"
 
-          echo "Checking versionName..."
-          grep -q 'versionName "2.9.101"' app/build.gradle
+          [ -f "$GRADLE" ] || GRADLE="$PROJECT/app/build.gradle.kts"
 
-          echo "Checking applicationId..."
-          grep -q 'applicationId "com.myshop.app"' app/build.gradle
+          CODE=$(sed -n 's/.*versionCode[[:space:]]*\([0-9]*\).*/\1/p' "$GRADLE" | head -1)
+          NAME=$(sed -n "s/.*versionName[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" "$GRADLE" | head -1)
 
-          echo "Checking V-101 MainActivity..."
-          grep -q 'class MainActivity' app/src/main/java/com/myshop/app/MainActivity.java
+          echo "ZIP Version : V-$SOURCE_VERSION"
+          echo "Code        : $CODE"
+          echo "Name        : $NAME"
 
-          echo "Checking V-101 master files..."
-          test -f V-101_MASTER_MANIFEST.txt
-          test -f V-101_RELEASE_NOTES.md
-          test -f V-101_SOURCE_INTEGRITY.txt
+          [ "$CODE" = "$SOURCE_VERSION" ] || {
+            echo "ERROR: ZIP and versionCode do not match."
+            exit 1
+          }
 
-          echo "Checking dashboard banner limit..."
-          grep -R -q '"maxBannersPerSection"[[:space:]]*:[[:space:]]*6' backend app/src/main/assets 2>/dev/null || true
+          [ -n "$NAME" ] || {
+            echo "ERROR: versionName not found."
+            exit 1
+          }
 
-          echo ""
-          echo "======================================"
-          echo "V-101 SOURCE VERIFICATION SUCCESS"
-          echo "VERSION CODE : 101"
-          echo "VERSION NAME : 2.9.101"
-          echo "PACKAGE      : com.myshop.app"
-          echo "======================================"
-
-      # --------------------------------------------------
-      # 5. Setup Java 17
-      # --------------------------------------------------
-      - name: Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # --------------------------------------------------
-      # 6. Setup Android SDK
-      # --------------------------------------------------
-      - name: Setup Android SDK
+      - name: Setup Android
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK
         run: |
           sdkmanager "platform-tools" \
-                     "platforms;android-35" \
-                     "build-tools;35.0.0"
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
-      # --------------------------------------------------
-      # 7. Setup Gradle
-      # --------------------------------------------------
-      - name: Setup Gradle 8.11.1
+      - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.11.1"
 
-      # --------------------------------------------------
-      # 8. Show build environment
-      # --------------------------------------------------
-      - name: Show build environment
-        run: |
-          java -version
-          gradle --version
-          echo "ANDROID_HOME=$ANDROID_HOME"
-
-      # --------------------------------------------------
-      # 9. Build EXACTLY ONE APK
-      # --------------------------------------------------
-      - name: Build V-101 APK
-        working-directory: v101_source
+      - name: Build APK
+        working-directory: ${{ env.PROJECT }}
         shell: bash
         run: |
           set -e
 
           rm -rf app/build
 
-          echo "Starting V-101 clean build..."
+          gradle clean :app:assembleDebug --no-daemon
 
-          gradle clean :app:assembleDebug --no-daemon --stacktrace
+          mapfile -t APKs < <(
+            find app/build/outputs/apk \
+            -type f -name "*.apk"
+          )
 
-          echo ""
-          echo "Searching for generated APK..."
-
-          APK_COUNT=$(find app/build/outputs/apk -type f -name "*.apk" | wc -l)
-
-          echo "APK COUNT = $APK_COUNT"
-
-          if [ "$APK_COUNT" -ne 1 ]; then
+          [ "${#APKs[@]}" -eq 1 ] || {
             echo "ERROR: Expected exactly ONE APK."
-            find app/build/outputs/apk -type f -name "*.apk" -print || true
+            printf '%s\n' "${APKs[@]}"
             exit 1
-          fi
-
-          APK_SOURCE=$(find app/build/outputs/apk -type f -name "*.apk" -print -quit)
+          }
 
           mkdir -p "$GITHUB_WORKSPACE/release"
 
-          cp "$APK_SOURCE" \
-             "$GITHUB_WORKSPACE/release/V-101-MY-SHOP-DASHBOARD-TEST.apk"
+          APK="V-${SOURCE_VERSION}-MY-SHOP.apk"
 
-          echo "APK created:"
-          ls -lh "$GITHUB_WORKSPACE/release/V-101-MY-SHOP-DASHBOARD-TEST.apk"
+          cp "${APKs[0]}" \
+            "$GITHUB_WORKSPACE/release/$APK"
 
-      # --------------------------------------------------
-      # 10. Verify APK
-      # --------------------------------------------------
-      - name: Verify APK
-        shell: bash
-        run: |
-          set -e
+          sha256sum \
+            "$GITHUB_WORKSPACE/release/$APK" \
+            > "$GITHUB_WORKSPACE/release/$APK.sha256"
 
-          APK="release/V-101-MY-SHOP-DASHBOARD-TEST.apk"
+          echo "APK=$APK" >> "$GITHUB_ENV"
 
-          test -f "$APK"
-
-          echo "APK SHA256:"
-          sha256sum "$APK" | tee release/V-101-MY-SHOP-DASHBOARD-TEST.sha256
-
-          echo ""
-          echo "APK information:"
-          ls -lh "$APK"
-
-          echo ""
-          echo "V-101 APK verification SUCCESS."
-
-      # --------------------------------------------------
-      # 11. Create full V-101 master backup
-      # --------------------------------------------------
-      - name: Create V-101 full master backup
-        shell: bash
-        run: |
-          set -e
-
-          mkdir -p backup_package
-
-          cp -r v101_source backup_package/MY_SHOP_V101_SOURCE
-
-          cp release/V-101-MY-SHOP-DASHBOARD-TEST.apk \
-             backup_package/
-
-          cp release/V-101-MY-SHOP-DASHBOARD-TEST.sha256 \
-             backup_package/
-
-          cat > backup_package/V-101_BUILD_INFO.txt <<EOF
-          MY SHOP V-101 BUILD
-
-          Version Code: 101
-          Version Name: 2.9.101
-          Package Name: com.myshop.app
-
-          Source ZIP:
-          ${SOURCE_ZIP}
-
-          Build Type:
-          DEBUG TEST BUILD
-
-          APK:
-          V-101-MY-SHOP-DASHBOARD-TEST.apk
-          EOF
-
-          cd backup_package
-
-          zip -qr \
-            "$GITHUB_WORKSPACE/release/V-101-MY-SHOP-FULL-BUILD-BACKUP.zip" \
-            .
-
-          cd "$GITHUB_WORKSPACE"
-
-          echo "Full backup created:"
-          ls -lh release/V-101-MY-SHOP-FULL-BUILD-BACKUP.zip
-
-      # --------------------------------------------------
-      # 12. Upload ONLY required APK
-      # --------------------------------------------------
-      - name: Upload V-101 APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: V-101-MY-SHOP-DASHBOARD-TEST
-          path: release/V-101-MY-SHOP-DASHBOARD-TEST.apk
-          if-no-files-found: error
-          retention-days: 30
-
-      # --------------------------------------------------
-      # 13. Upload complete backup
-      # --------------------------------------------------
-      - name: Upload V-101 full backup
-        uses: actions/upload-artifact@v4
-        with:
-          name: V-101-MY-SHOP-FULL-BUILD-BACKUP
+          name: MY-SHOP-V-${{ env.SOURCE_VERSION }}
           path: |
-            release/V-101-MY-SHOP-FULL-BUILD-BACKUP.zip
-            release/V-101-MY-SHOP-DASHBOARD-TEST.sha256
-          if-no-files-found: error
-          retention-days: 30
-
-      # --------------------------------------------------
-      # 14. Final success message
-      # --------------------------------------------------
-      - name: V-101 BUILD SUCCESS
-        run: |
-          echo ""
-          echo "=============================================="
-          echo "       MY SHOP V-101 BUILD SUCCESS"
-          echo "=============================================="
-          echo ""
-          echo "Version Code : 101"
-          echo "Version Name : 2.9.101"
-          echo "Package      : com.myshop.app"
-          echo ""
-          echo "APK:"
-          echo "V-101-MY-SHOP-DASHBOARD-TEST.apk"
-          echo ""
-          echo "The build used EXACTLY:"
-          echo "${SOURCE_ZIP}"
-          echo ""
-          echo "No older V-XX ZIP was selected."
-          echo "=============================================="
+            release/${{ env.APK }}
+            release/${{ env.APK }}.sha256
