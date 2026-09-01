@@ -11,44 +11,55 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
   VERSION_NUMBER: "94"
   VERSION_NAME: "2.9.94"
+
   PACKAGE_NAME: "com.myshop.app"
-  SOURCE_ZIP: "V-91_MY_SHOP_FULL_PROJECT_SOURCE.zip"
+
+  SOURCE_ZIP: "MY-SHOP-V94-FULL-PROJECT-FINAL.zip"
   SOURCE_DIR: "v94_source"
   RELEASE_DIR: "release"
 
 jobs:
   build:
+
     name: V-94 - VERIFIED APK
+
     runs-on: ubuntu-latest
+
     timeout-minutes: 45
 
     steps:
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Verify source ZIP
+      - name: Verify V-94 source
         shell: bash
         run: |
           set -euo pipefail
 
           if [ ! -f "$SOURCE_ZIP" ]; then
-            echo "::error::Source ZIP not found: $SOURCE_ZIP"
+            echo "::error::V-94 source ZIP not found:"
+            echo "$SOURCE_ZIP"
             exit 1
           fi
 
           if [ ! -s "$SOURCE_ZIP" ]; then
-            echo "::error::Source ZIP is empty."
+            echo "::error::V-94 source ZIP is empty."
             exit 1
           fi
 
+          echo "========================================"
           echo "V-94 SOURCE VERIFIED"
+          echo "========================================"
+
           ls -lh "$SOURCE_ZIP"
           sha256sum "$SOURCE_ZIP"
 
-      - name: Extract source
+      - name: Extract V-94 project
         shell: bash
         run: |
           set -euo pipefail
@@ -61,9 +72,9 @@ jobs:
 
           unzip -q "$SOURCE_ZIP" -d "$SOURCE_DIR"
 
-          echo "SOURCE EXTRACTED"
+          echo "V-94 PROJECT EXTRACTED"
 
-      - name: Locate exactly one Android project
+      - name: Locate Android project
         id: project
         shell: bash
         run: |
@@ -80,7 +91,9 @@ jobs:
 
           if [ "${#SETTINGS[@]}" -ne 1 ]; then
             echo "::error::Expected exactly ONE Android project."
+
             printf '%s\n' "${SETTINGS[@]}"
+
             exit 1
           fi
 
@@ -91,7 +104,7 @@ jobs:
           elif [ -f "$ROOT/app/build.gradle.kts" ]; then
             APP_GRADLE="$ROOT/app/build.gradle.kts"
           else
-            echo "::error::App Gradle file not found."
+            echo "::error::app/build.gradle not found."
             exit 1
           fi
 
@@ -106,11 +119,129 @@ jobs:
           echo "app_gradle=$APP_GRADLE" >> "$GITHUB_OUTPUT"
           echo "manifest=$MANIFEST" >> "$GITHUB_OUTPUT"
 
-          echo "ANDROID ROOT: $ROOT"
-          echo "APP GRADLE: $APP_GRADLE"
-          echo "MANIFEST: $MANIFEST"
+          echo "ANDROID ROOT:"
+          echo "$ROOT"
 
-      - name: Fix invalid dashboard reference
+      - name: Repair AccountStore SHA-256
+        working-directory: ${{ steps.project.outputs.root }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -d '' FILES < <(
+            find app/src/main/java \
+              -type f \
+              -name "AccountStore.java" \
+              -print0
+          )
+
+          if [ "${#FILES[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly ONE AccountStore.java."
+
+            printf '%s\n' "${FILES[@]}"
+
+            exit 1
+          fi
+
+          ACCOUNT_STORE="${FILES[0]}"
+
+          echo "AccountStore:"
+          echo "$ACCOUNT_STORE"
+
+          python3 - "$ACCOUNT_STORE" <<'PY'
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+
+          text = path.read_text(encoding="utf-8")
+
+          old_call = 'MessageDigest.getInstance("SHA-256")'
+          new_call = 'v94Sha256Digest()'
+
+          count = text.count(old_call)
+
+          print(f"SHA-256 calls found: {count}")
+
+          if count == 0:
+              print("No direct SHA-256 call found.")
+
+          else:
+              text = text.replace(old_call, new_call)
+
+          helper = r'''
+          /*
+           * V-94 SHA-256 compatibility helper.
+           *
+           * MessageDigest.getInstance() throws NoSuchAlgorithmException.
+           * SHA-256 is required by the Android runtime, so the exception
+           * is converted into a clear runtime error here.
+           */
+          private static java.security.MessageDigest v94Sha256Digest() {
+              try {
+                  return java.security.MessageDigest.getInstance("SHA-256");
+              } catch (java.security.NoSuchAlgorithmException e) {
+                  throw new IllegalStateException(
+                      "SHA-256 algorithm is unavailable",
+                      e
+                  );
+              }
+          }
+          '''
+
+          marker = "V-94 SHA-256 compatibility helper."
+
+          if marker not in text:
+
+              last = text.rfind("}")
+
+              if last == -1:
+                  raise SystemExit(
+                      "ERROR: AccountStore.java closing brace not found."
+                  )
+
+              text = (
+                  text[:last]
+                  + helper
+                  + "\n"
+                  + text[last:]
+              )
+
+          path.write_text(text, encoding="utf-8")
+
+          print("========================================")
+          print("V-94 AccountStore SHA-256 FIX APPLIED")
+          print("========================================")
+          PY
+
+      - name: Verify AccountStore repair
+        working-directory: ${{ steps.project.outputs.root }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -d '' FILES < <(
+            find app/src/main/java \
+              -type f \
+              -name "AccountStore.java" \
+              -print0
+          )
+
+          if [ "${#FILES[@]}" -ne 1 ]; then
+            echo "::error::AccountStore.java verification failed."
+            exit 1
+          fi
+
+          ACCOUNT_STORE="${FILES[0]}"
+
+          if ! grep -Fq "v94Sha256Digest()" "$ACCOUNT_STORE"; then
+            echo "::error::V-94 SHA-256 helper not found."
+            exit 1
+          fi
+
+          echo "V-94 ACCOUNTSTORE FIX VERIFIED"
+
+      - name: Fix dashboard reference
         working-directory: ${{ steps.project.outputs.root }}
         shell: bash
         run: |
@@ -122,16 +253,16 @@ jobs:
           if [ -f "$BAD" ]; then
 
             if [ ! -s "$GOOD" ]; then
-              echo "::error::Verified dashboard header not found."
+              echo "::error::Dashboard header image not found."
               exit 1
             fi
 
             cp -f "$GOOD" "$BAD"
 
-            echo "Dashboard reference PNG repaired."
+            echo "Dashboard reference repaired."
 
           else
-            echo "Dashboard reference file not present."
+            echo "Dashboard reference does not exist."
           fi
 
       - name: Verify package and launcher
@@ -145,6 +276,7 @@ jobs:
           if ! grep -Eq \
             "applicationId[[:space:]]*(=)?[[:space:]]*['\"]com\.myshop\.app['\"]" \
             "$APP_GRADLE"; then
+
             echo "::error::Package com.myshop.app not found."
             exit 1
           fi
@@ -169,7 +301,7 @@ jobs:
           java-version: "17"
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install Android SDK
         shell: bash
@@ -203,6 +335,7 @@ jobs:
           from pathlib import Path
 
           path = Path(sys.argv[1])
+
           text = path.read_text(encoding="utf-8")
 
           text, code_count = re.subn(
@@ -262,6 +395,7 @@ jobs:
           rm -rf app/build
 
           if [ -f "./gradlew" ]; then
+
             chmod +x ./gradlew
 
             ./gradlew \
@@ -271,7 +405,9 @@ jobs:
               --no-build-cache \
               --rerun-tasks \
               --stacktrace
+
           else
+
             gradle \
               clean \
               :app:assembleRelease \
@@ -279,6 +415,7 @@ jobs:
               --no-build-cache \
               --rerun-tasks \
               --stacktrace
+
           fi
 
           mapfile -d '' APKS < <(
@@ -289,13 +426,13 @@ jobs:
           )
 
           if [ "${#APKS[@]}" -ne 1 ]; then
+
             echo "::error::Expected exactly ONE release APK."
 
-            if [ "${#APKS[@]}" -gt 0 ]; then
-              printf '%s\n' "${APKS[@]}"
-            fi
+            printf '%s\n' "${APKS[@]}"
 
             exit 1
+
           fi
 
           echo "APK FOUND:"
@@ -310,6 +447,7 @@ jobs:
           STORE_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_STORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.MY_SHOP_RELEASE_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_KEY_PASSWORD }}
+
         run: |
           set -euo pipefail
 
@@ -351,13 +489,16 @@ jobs:
           STORE_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_STORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.MY_SHOP_RELEASE_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_KEY_PASSWORD }}
+
         run: |
           set -euo pipefail
 
           BT="$ANDROID_HOME/build-tools/35.0.0"
 
           UNSIGNED="${{ steps.apk.outputs.path }}"
+
           ALIGNED="$RUNNER_TEMP/V-94_ALIGNED.apk"
+
           SIGNED="$RUNNER_TEMP/V-94_MY_SHOP_FINAL.apk"
 
           "$BT/zipalign" \
@@ -391,6 +532,7 @@ jobs:
           set -euo pipefail
 
           BT="$ANDROID_HOME/build-tools/35.0.0"
+
           APK="${{ steps.signed.outputs.signed_path }}"
 
           BADGING="$("$BT/aapt2" dump badging "$APK")"
@@ -419,6 +561,7 @@ jobs:
           set -euo pipefail
 
           FINAL="$GITHUB_WORKSPACE/$RELEASE_DIR/V-94_MY_SHOP_FINAL_APK.apk"
+
           SHA="$GITHUB_WORKSPACE/$RELEASE_DIR/V-94_MY_SHOP_FINAL_APK.sha256"
 
           rm -f "$RELEASE_DIR"/*.apk
@@ -440,7 +583,7 @@ jobs:
           )"
 
           if [ "$COUNT" -ne 1 ]; then
-            echo "::error::Expected exactly ONE final APK. Found: $COUNT"
+            echo "::error::Expected ONE final APK. Found: $COUNT"
             exit 1
           fi
 
@@ -454,9 +597,10 @@ jobs:
           echo "========================================"
 
           ls -lh "$RELEASE_DIR"
+
           cat "$SHA"
 
-      - name: Upload V-94 APK
+      - name: Upload V-94 final APK
         uses: actions/upload-artifact@v4
         with:
           name: V-94_MY_SHOP_FINAL_APK
@@ -472,6 +616,7 @@ jobs:
           set -euo pipefail
 
           APK="$GITHUB_WORKSPACE/release/V-94_MY_SHOP_FINAL_APK.apk"
+
           SHA="$GITHUB_WORKSPACE/release/V-94_MY_SHOP_FINAL_APK.sha256"
 
           test -s "$APK"
