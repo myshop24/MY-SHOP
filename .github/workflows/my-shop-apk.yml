@@ -19,22 +19,15 @@ jobs:
         run: |
           set -e
 
-          files=()
-          for f in V-*.zip V_*.zip; do
-            [ -f "$f" ] && files+=("$f")
-          done
-
-          [ ${#files[@]} -gt 0 ] || {
-            echo "ERROR: No V-XX ZIP found."
-            exit 1
-          }
-
           best=""
           bestver=-1
 
-          for f in "${files[@]}"; do
+          for f in V-*.zip V_*.zip; do
+            [ -f "$f" ] || continue
+
             if [[ "$f" =~ ^V[-_]([0-9]+)-.*\.zip$ ]]; then
               v=$((10#${BASH_REMATCH[1]}))
+
               if [ "$v" -gt "$bestver" ]; then
                 bestver=$v
                 best="$f"
@@ -43,7 +36,7 @@ jobs:
           done
 
           [ -n "$best" ] || {
-            echo "ERROR: Invalid V-XX ZIP name."
+            echo "ERROR: No V-XX ZIP found."
             exit 1
           }
 
@@ -85,7 +78,10 @@ jobs:
 
           GRADLE="$PROJECT/app/build.gradle"
 
-          [ -f "$GRADLE" ] || GRADLE="$PROJECT/app/build.gradle.kts"
+          [ -f "$GRADLE" ] || {
+            echo "ERROR: app/build.gradle not found."
+            exit 1
+          }
 
           CODE=$(sed -n 's/.*versionCode[[:space:]]*\([0-9]*\).*/\1/p' "$GRADLE" | head -1)
           NAME=$(sed -n "s/.*versionName[[:space:]]*['\"]\([^'\"]*\)['\"].*/\1/p" "$GRADLE" | head -1)
@@ -95,7 +91,7 @@ jobs:
           echo "Name        : $NAME"
 
           [ "$CODE" = "$SOURCE_VERSION" ] || {
-            echo "ERROR: ZIP and versionCode do not match."
+            echo "ERROR: ZIP version and versionCode do not match."
             exit 1
           }
 
@@ -103,6 +99,21 @@ jobs:
             echo "ERROR: versionName not found."
             exit 1
           }
+
+      - name: Prepare Android build
+        shell: bash
+        run: |
+          set -e
+
+          GRADLE="$PROJECT/app/build.gradle"
+
+          if ! grep -q "buildFeatures" "$GRADLE"; then
+            sed -i '0,/android[[:space:]]*{/s//android {\n    buildFeatures { buildConfig true }/' "$GRADLE"
+          fi
+
+          echo "BuildConfig enabled."
+
+          grep -n "buildFeatures" "$GRADLE" || true
 
       - name: Setup Java
         uses: actions/setup-java@v4
