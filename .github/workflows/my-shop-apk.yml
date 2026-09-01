@@ -6,9 +6,20 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: my-shop-v91-final
+  cancel-in-progress: true
+
+env:
+  VERSION_NUMBER: "91"
+  VERSION_NAME: "2.9.91"
+  PACKAGE_NAME: "com.myshop.app"
+  SOURCE_DIR: "v91_source"
+  RELEASE_DIR: "release"
+
 jobs:
   build:
-    name: V-91 VERIFIED APK
+    name: V-91 - SINGLE VERIFIED APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -16,181 +27,64 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find V-90 source
+      - name: Lock repository to EXACT V-91 source
         shell: bash
         run: |
           set -euo pipefail
 
-          SOURCE="V-90 MY SHOP FULL PROJECT SOURCE.zip"
+          mapfile -t SOURCES < <(
+            find . -maxdepth 1 -type f \
+              -name 'V-91_MY_SHOP_FULL_PROJECT_SOURCE.zip' | sort
+          )
 
-          if [ ! -f "$SOURCE" ]; then
-            echo "::error::Required source not found: $SOURCE"
+          if [ "${#SOURCES[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly ONE V-91 master source ZIP."
+            echo "Found: ${#SOURCES[@]}"
+            printf '%s\n' "${SOURCES[@]:-<none>}"
             exit 1
           fi
 
-          test -s "$SOURCE"
-          echo "SOURCE=$SOURCE" >> "$GITHUB_ENV"
+          SOURCE_ZIP="${SOURCES[0]}"
 
-      - name: Extract source
+          test -s "$SOURCE_ZIP"
+
+          echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
+
+          echo "V-91 source lock passed."
+          sha256sum "$SOURCE_ZIP"
+
+      - name: Extract V-91 source
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf source release
-          mkdir -p source release
+          rm -rf "$SOURCE_DIR" "$RELEASE_DIR"
 
-          unzip -q "$SOURCE" -d source
+          mkdir -p "$SOURCE_DIR" "$RELEASE_DIR"
 
-      - name: Locate Android project
+          unzip -q "$SOURCE_ZIP" -d "$SOURCE_DIR"
+
+      - name: Locate exactly one Android project
         id: project
         shell: bash
         run: |
           set -euo pipefail
 
           mapfile -t SETTINGS < <(
-            find source -type f \
-              -name "settings.gradle" -o -name "settings.gradle.kts" \
-              -not -path "*/build/*" \
-              -not -path "*/.gradle/*" \
-              | sort
+            find "$SOURCE_DIR" -type f \
+              -name settings.gradle -o -name settings.gradle.kts \
+              -not -path '*/build/*' \
+              -not -path '*/.gradle/*' | sort
           )
 
-          if [ "${#SETTINGS[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one Android project."
+          [ "${#SETTINGS[@]}" -eq 1 ] || {
+            echo "::error::Expected exactly ONE Android project."
             printf '%s\n' "${SETTINGS[@]:-<none>}"
             exit 1
-          fi
+          }
 
           ROOT="$(dirname "${SETTINGS[0]}")"
 
           if [ -f "$ROOT/app/build.gradle" ]; then
             APP_GRADLE="$ROOT/app/build.gradle"
-          elif [ -f "$ROOT/app/build.gradle.kts" ]; then
-            APP_GRADLE="$ROOT/app/build.gradle.kts"
-          else
-            echo "::error::app/build.gradle not found."
-            exit 1
-          fi
-
-          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
-          echo "gradle=$APP_GRADLE" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.11.1"
-
-      - name: Set V-91 version
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          FILE="${{ steps.project.outputs.gradle }}"
-
-          python3 - "$FILE" <<'PY'
-          import re
-          import sys
-          from pathlib import Path
-
-          p = Path(sys.argv[1])
-          s = p.read_text(encoding="utf-8")
-
-          s, code = re.subn(
-              r'(\bversionCode\s*=\s*)\d+',
-              r'\g<1>91',
-              s,
-              count=1
-          )
-
-          s, name = re.subn(
-              r'(\bversionName\s*=\s*)["\'][^"\']*["\']',
-              r'\g<1>"2.9.91"',
-              s,
-              count=1
-          )
-
-          if code != 1:
-              raise SystemExit("versionCode was not found exactly once")
-
-          if name != 1:
-              raise SystemExit("versionName was not found exactly once")
-
-          p.write_text(s, encoding="utf-8")
-          PY
-
-      - name: Verify V-91 version
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          FILE="${{ steps.project.outputs.gradle }}"
-
-          grep -Eq 'versionCode[[:space:]]*=[[:space:]]*91' "$FILE"
-          grep -Eq 'versionName[[:space:]]*=[[:space:]]*["'\'']2\.9\.91["'\'']' "$FILE"
-
-      - name: Build release APK
-        id: build
-        working-directory: ${{ steps.project.outputs.root }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            ./gradlew clean assembleRelease \
-              --no-daemon \
-              --no-build-cache \
-              --rerun-tasks \
-              --stacktrace
-          else
-            gradle clean assembleRelease \
-              --no-daemon \
-              --no-build-cache \
-              --rerun-tasks \
-              --stacktrace
-          fi
-
-          mapfile -t APKS < <(
-            find app/build/outputs/apk/release \
-              -type f -name "*.apk" | sort
-          )
-
-          if [ "${#APKS[@]}" -ne 1 ]; then
-            echo "::error::Exactly ONE release APK is required."
-            printf '%s\n' "${APKS[@]:-<none>}"
-            exit 1
-          fi
-
-          echo "apk=${APKS[0]}" >> "$GITHUB_OUTPUT"
-
-      - name: Verify APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="${{ steps.build.outputs.apk }}"
-
-          test -s "$APK"
-
-          "$ANDROID_HOME/build-tools/35.
+          elif [ -f "$
