@@ -1,4 +1,4 @@
-name: V-92 MY SHOP BUILD FIX
+name: V-92 MY SHOP BUILD FIX 2
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: my-shop-v92-build-fix
+  group: my-shop-v92-build-fix-2
   cancel-in-progress: true
 
 env:
@@ -20,7 +20,7 @@ env:
 
 jobs:
   build:
-    name: V-92 - FIXED BUILD
+    name: V-92 - FIXED BUILD 2
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -29,25 +29,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ------------------------------------------------------------
-      # VERIFY ORIGINAL SOURCE
-      # ------------------------------------------------------------
       - name: Verify original source ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f "$SOURCE_ZIP"
-          test -s "$SOURCE_ZIP"
+          if [ ! -f "$SOURCE_ZIP" ]; then
+            echo "::error::Source ZIP not found: $SOURCE_ZIP"
+            exit 1
+          fi
+
+          if [ ! -s "$SOURCE_ZIP" ]; then
+            echo "::error::Source ZIP is empty."
+            exit 1
+          fi
 
           echo "SOURCE ZIP VERIFIED"
-          echo "File: $SOURCE_ZIP"
           ls -lh "$SOURCE_ZIP"
           sha256sum "$SOURCE_ZIP"
 
-      # ------------------------------------------------------------
-      # EXTRACT SOURCE
-      # ------------------------------------------------------------
       - name: Extract source
         shell: bash
         run: |
@@ -63,9 +63,6 @@ jobs:
 
           echo "SOURCE EXTRACTED"
 
-      # ------------------------------------------------------------
-      # LOCATE ANDROID PROJECT
-      # ------------------------------------------------------------
       - name: Locate Android project
         id: project
         shell: bash
@@ -106,18 +103,18 @@ jobs:
 
           MANIFEST="$ROOT/app/src/main/AndroidManifest.xml"
 
-          test -s "$MANIFEST"
+          if [ ! -s "$MANIFEST" ]; then
+            echo "::error::AndroidManifest.xml not found."
+            exit 1
+          fi
 
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "app_gradle=$APP_GRADLE" >> "$GITHUB_OUTPUT"
           echo "manifest=$MANIFEST" >> "$GITHUB_OUTPUT"
 
-          echo "ANDROID PROJECT:"
+          echo "ANDROID ROOT:"
           echo "$ROOT"
 
-      # ------------------------------------------------------------
-      # VERIFY PACKAGE
-      # ------------------------------------------------------------
       - name: Verify package and launcher
         shell: bash
         run: |
@@ -126,24 +123,26 @@ jobs:
           APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
           MANIFEST="${{ steps.project.outputs.manifest }}"
 
-          grep -Eq \
+          if ! grep -Eq \
             "applicationId[[:space:]]*(=)?[[:space:]]*['\"]com\.myshop\.app['\"]" \
-            "$APP_GRADLE"
+            "$APP_GRADLE"; then
+            echo "::error::Package com.myshop.app not found."
+            exit 1
+          fi
 
-          grep -Fq \
-            "android.intent.action.MAIN" \
-            "$MANIFEST"
+          if ! grep -Fq "android.intent.action.MAIN" "$MANIFEST"; then
+            echo "::error::MAIN launcher not found."
+            exit 1
+          fi
 
-          grep -Fq \
-            "android.intent.category.LAUNCHER" \
-            "$MANIFEST"
+          if ! grep -Fq "android.intent.category.LAUNCHER" "$MANIFEST"; then
+            echo "::error::LAUNCHER category not found."
+            exit 1
+          fi
 
           echo "PACKAGE VERIFIED"
           echo "LAUNCHER VERIFIED"
 
-      # ------------------------------------------------------------
-      # FIX INVALID PNG
-      # ------------------------------------------------------------
       - name: Fix invalid dashboard reference PNG
         working-directory: ${{ steps.project.outputs.root }}
         shell: bash
@@ -156,48 +155,95 @@ jobs:
           echo "Checking dashboard resources..."
 
           if [ ! -f "$GOOD" ]; then
-            echo "::error::Verified dashboard header image not found:"
-            echo "$GOOD"
+            echo "::error::Verified dashboard header image not found."
             exit 1
           fi
 
           if [ ! -s "$GOOD" ]; then
-            echo "::error::Verified dashboard header image is empty."
+            echo "::error::Dashboard header image is empty."
             exit 1
           fi
 
-          if [ -f "$BAD" ]; then
-            echo "Invalid dashboard reference found."
-            echo "Replacing with verified dashboard header."
+          cp -f "$GOOD" "$BAD"
 
-            rm -f "$BAD"
-            cp "$GOOD" "$BAD"
-          else
-            echo "Dashboard reference file does not exist."
-            echo "Creating it from verified dashboard header."
-
-            cp "$GOOD" "$BAD"
+          if [ ! -s "$BAD" ]; then
+            echo "::error::Dashboard PNG fix failed."
+            exit 1
           fi
 
-          test -s "$BAD"
-
           echo "DASHBOARD PNG FIXED"
-
           file "$BAD"
           ls -lh "$BAD"
 
-      # ------------------------------------------------------------
-      # JAVA
-      # ------------------------------------------------------------
+      - name: Fix AccountStore SHA-256 exception
+        working-directory: ${{ steps.project.outputs.root }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="app/src/main/java/com/myshop/app/AccountStore.java"
+
+          if [ ! -f "$FILE" ]; then
+            echo "::error::AccountStore.java not found:"
+            echo "$FILE"
+            exit 1
+          fi
+
+          echo "Checking AccountStore.java..."
+
+          python3 - "$FILE" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8")
+
+          pattern = re.compile(
+              r'(?m)^([ \t]*)return\s+"sha256:"\s*\+\s*'
+              r'sha256\(canonicalAnswer\(answer\)\)\s*;'
+          )
+
+          match = pattern.search(text)
+
+          if not match:
+              raise SystemExit(
+                  "ERROR: Expected SHA-256 return statement was not found."
+              )
+
+          indent = match.group(1)
+
+          replacement = (
+              indent + "try {\n"
+              + indent + "    return \"sha256:\" + "
+                "sha256(canonicalAnswer(answer));\n"
+              + indent + "} catch (java.security.NoSuchAlgorithmException e) {\n"
+              + indent + "    throw new IllegalStateException("
+                "\"SHA-256 algorithm is unavailable\", e);\n"
+              + indent + "}"
+          )
+
+          text = text[:match.start()] + replacement + text[match.end():]
+
+          path.write_text(text, encoding="utf-8")
+
+          print("ACCOUNTSTORE SHA-256 EXCEPTION FIXED")
+          PY
+
+          echo "Checking patched source..."
+
+          grep -n -A8 -B3 \
+            'SHA-256 algorithm is unavailable' \
+            "$FILE"
+
+          echo "ACCOUNTSTORE FIX VERIFIED"
+
       - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      # ------------------------------------------------------------
-      # ANDROID SDK
-      # ------------------------------------------------------------
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
@@ -215,17 +261,11 @@ jobs:
 
           echo "ANDROID SDK READY"
 
-      # ------------------------------------------------------------
-      # GRADLE
-      # ------------------------------------------------------------
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.11.1"
 
-      # ------------------------------------------------------------
-      # APPLY V-92 VERSION
-      # ------------------------------------------------------------
       - name: Apply V-92 version
         shell: bash
         run: |
@@ -271,9 +311,6 @@ jobs:
           print("VERSION NAME: 2.9.92")
           PY
 
-      # ------------------------------------------------------------
-      # BUILD
-      # ------------------------------------------------------------
       - name: Build release APK
         id: apk
         working-directory: ${{ steps.project.outputs.root }}
@@ -327,9 +364,6 @@ jobs:
 
           echo "path=${APKS[0]}" >> "$GITHUB_OUTPUT"
 
-      # ------------------------------------------------------------
-      # PERMANENT SIGNING KEY
-      # ------------------------------------------------------------
       - name: Require permanent signing key
         shell: bash
         env:
@@ -340,22 +374,37 @@ jobs:
         run: |
           set -euo pipefail
 
-          test -n "$KEYSTORE_B64"
-          test -n "$STORE_PASSWORD"
-          test -n "$KEY_ALIAS"
-          test -n "$KEY_PASSWORD"
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::MY_SHOP_RELEASE_KEYSTORE_B64 secret missing."
+            exit 1
+          fi
+
+          if [ -z "$STORE_PASSWORD" ]; then
+            echo "::error::MY_SHOP_RELEASE_STORE_PASSWORD secret missing."
+            exit 1
+          fi
+
+          if [ -z "$KEY_ALIAS" ]; then
+            echo "::error::MY_SHOP_RELEASE_KEY_ALIAS secret missing."
+            exit 1
+          fi
+
+          if [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::MY_SHOP_RELEASE_KEY_PASSWORD secret missing."
+            exit 1
+          fi
 
           printf '%s' "$KEYSTORE_B64" \
             | base64 --decode \
             > "$RUNNER_TEMP/myshop-release.jks"
 
-          test -s "$RUNNER_TEMP/myshop-release.jks"
+          if [ ! -s "$RUNNER_TEMP/myshop-release.jks" ]; then
+            echo "::error::Release keystore is invalid or empty."
+            exit 1
+          fi
 
           echo "PERMANENT SIGNING KEY VERIFIED"
 
-      # ------------------------------------------------------------
-      # SIGN
-      # ------------------------------------------------------------
       - name: Sign V-92 APK
         id: signed
         shell: bash
@@ -369,7 +418,6 @@ jobs:
           BT="$ANDROID_HOME/build-tools/35.0.0"
 
           UNSIGNED="${{ steps.apk.outputs.path }}"
-
           ALIGNED="$RUNNER_TEMP/V-92_ALIGNED.apk"
           SIGNED="$RUNNER_TEMP/V-92_MY_SHOP_FINAL.apk"
 
@@ -400,16 +448,12 @@ jobs:
 
           echo "SIGNED APK VERIFIED"
 
-      # ------------------------------------------------------------
-      # VERIFY APK IDENTITY
-      # ------------------------------------------------------------
       - name: Verify final APK identity
         shell: bash
         run: |
           set -euo pipefail
 
           BT="$ANDROID_HOME/build-tools/35.0.0"
-
           APK="${{ steps.signed.outputs.signed_path }}"
 
           BADGING="$("$BT/aapt2" dump badging "$APK")"
@@ -425,16 +469,11 @@ jobs:
           echo "$BADGING" \
             | grep -Fq "versionCode='92'"
 
-          echo "========================================"
-          echo "V-92 APK IDENTITY VERIFIED"
+          echo "APK IDENTITY VERIFIED"
           echo "Package: com.myshop.app"
           echo "Version: 2.9.92"
           echo "Version Code: 92"
-          echo "========================================"
 
-      # ------------------------------------------------------------
-      # PREPARE FINAL APK
-      # ------------------------------------------------------------
       - name: Prepare final APK
         shell: bash
         run: |
@@ -469,16 +508,10 @@ jobs:
             exit 1
           fi
 
-          echo "========================================"
-          echo "V-92 FINAL APK READY"
-          echo "========================================"
-
+          echo "FINAL APK READY"
           ls -lh "$RELEASE_DIR"
           cat "$SHA"
 
-      # ------------------------------------------------------------
-      # UPLOAD
-      # ------------------------------------------------------------
       - name: Upload V-92 final APK
         uses: actions/upload-artifact@v4
         with:
@@ -489,9 +522,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # ------------------------------------------------------------
-      # FINAL GUARD
-      # ------------------------------------------------------------
       - name: Final V-92 guard
         shell: bash
         run: |
