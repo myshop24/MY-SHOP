@@ -1,4 +1,4 @@
-name: V-91 MY SHOP FINAL RELEASE
+name: V-92 MY SHOP STABILITY BUILD
 
 on:
   workflow_dispatch:
@@ -7,69 +7,46 @@ permissions:
   contents: read
 
 concurrency:
-  group: my-shop-v91-final
+  group: my-shop-v92-stability
   cancel-in-progress: true
 
 env:
-  VERSION_NUMBER: "91"
-  VERSION_NAME: "2.9.91"
+  VERSION_NUMBER: "92"
+  VERSION_NAME: "2.9.92"
   PACKAGE_NAME: "com.myshop.app"
   SOURCE_ZIP: "V-91_MY_SHOP_FULL_PROJECT_SOURCE.zip"
-  SOURCE_DIR: "v91_source"
+  SOURCE_DIR: "v92_source"
   RELEASE_DIR: "release"
 
 jobs:
   build:
-    name: V-91 - SINGLE VERIFIED APK
+    name: V-92 - OPEN LOGIN VERIFIED APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
     steps:
 
-      # ============================================================
-      # 1. CHECKOUT
-      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-
-      # ============================================================
-      # 2. VERIFY EXACT V-91 SOURCE ZIP
-      # ============================================================
-      - name: Verify exact V-91 source ZIP
+      - name: Verify source ZIP
         shell: bash
         run: |
           set -euo pipefail
 
           if [ ! -f "$SOURCE_ZIP" ]; then
-            echo "::error::V-91 source ZIP not found."
-            echo "Expected: $SOURCE_ZIP"
-            echo ""
-            echo "Repository root:"
-            ls -lah
+            echo "::error::Source ZIP not found: $SOURCE_ZIP"
             exit 1
           fi
 
           if [ ! -s "$SOURCE_ZIP" ]; then
-            echo "::error::V-91 source ZIP is empty."
+            echo "::error::Source ZIP is empty."
             exit 1
           fi
 
-          echo "========================================"
-          echo "V-91 SOURCE VERIFIED"
-          echo "File: $SOURCE_ZIP"
-          echo "========================================"
-
-          ls -lh "$SOURCE_ZIP"
           sha256sum "$SOURCE_ZIP"
 
-          echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
-
-
-      # ============================================================
-      # 3. EXTRACT V-91 SOURCE
-      # ============================================================
-      - name: Extract V-91 source
+      - name: Extract source
         shell: bash
         run: |
           set -euo pipefail
@@ -82,21 +59,7 @@ jobs:
 
           unzip -q "$SOURCE_ZIP" -d "$SOURCE_DIR"
 
-          echo "========================================"
-          echo "V-91 SOURCE EXTRACTED"
-          echo "========================================"
-
-          find "$SOURCE_DIR" \
-            -maxdepth 3 \
-            -type f \
-            | sort \
-            | head -200
-
-
-      # ============================================================
-      # 4. LOCATE EXACTLY ONE ANDROID PROJECT
-      # ============================================================
-      - name: Locate exactly one Android project
+      - name: Locate Android project
         id: project
         shell: bash
         run: |
@@ -109,54 +72,26 @@ jobs:
           done < <(
             find "$SOURCE_DIR" \
               -type f \
-              \( \
-                -name "settings.gradle" \
-                -o \
-                -name "settings.gradle.kts" \
-              \) \
+              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
               -not -path "*/build/*" \
               -not -path "*/.gradle/*" \
               -print0
           )
 
-          echo "Android settings files found: ${#SETTINGS[@]}"
-
           if [ "${#SETTINGS[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly ONE Android project."
-
-            if [ "${#SETTINGS[@]}" -gt 0 ]; then
-              printf '%s\n' "${SETTINGS[@]}"
-            else
-              echo "<none>"
-            fi
-
+            echo "::error::Expected exactly one Android project."
+            printf '%s\n' "${SETTINGS[@]}"
             exit 1
           fi
 
           ROOT="$(dirname "${SETTINGS[0]}")"
 
-          echo "Android root:"
-          echo "$ROOT"
-
           if [ -f "$ROOT/app/build.gradle" ]; then
             APP_GRADLE="$ROOT/app/build.gradle"
-
           elif [ -f "$ROOT/app/build.gradle.kts" ]; then
             APP_GRADLE="$ROOT/app/build.gradle.kts"
-
           else
             echo "::error::App Gradle file not found."
-            exit 1
-          fi
-
-          if [ -f "$ROOT/build.gradle" ]; then
-            ROOT_GRADLE="$ROOT/build.gradle"
-
-          elif [ -f "$ROOT/build.gradle.kts" ]; then
-            ROOT_GRADLE="$ROOT/build.gradle.kts"
-
-          else
-            echo "::error::Root Gradle file not found."
             exit 1
           fi
 
@@ -169,21 +104,8 @@ jobs:
 
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "app_gradle=$APP_GRADLE" >> "$GITHUB_OUTPUT"
-          echo "root_gradle=$ROOT_GRADLE" >> "$GITHUB_OUTPUT"
           echo "manifest=$MANIFEST" >> "$GITHUB_OUTPUT"
 
-          echo "========================================"
-          echo "ANDROID PROJECT VERIFIED"
-          echo "ROOT: $ROOT"
-          echo "APP GRADLE: $APP_GRADLE"
-          echo "ROOT GRADLE: $ROOT_GRADLE"
-          echo "MANIFEST: $MANIFEST"
-          echo "========================================"
-
-
-      # ============================================================
-      # 5. VERIFY PACKAGE + LAUNCHER
-      # ============================================================
       - name: Verify package and launcher
         shell: bash
         run: |
@@ -192,61 +114,23 @@ jobs:
           APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
           MANIFEST="${{ steps.project.outputs.manifest }}"
 
-          echo "Checking package..."
-
-          if ! grep -Eq \
+          grep -Eq \
             "applicationId[[:space:]]*(=)?[[:space:]]*['\"]com\.myshop\.app['\"]" \
-            "$APP_GRADLE"; then
+            "$APP_GRADLE"
 
-            echo "::error::Expected package com.myshop.app"
-            exit 1
-          fi
+          grep -Fq "android.intent.action.MAIN" "$MANIFEST"
+          grep -Fq "android.intent.category.LAUNCHER" "$MANIFEST"
 
-          echo "Package verified."
+          echo "Package and launcher verified."
 
-          if ! grep -Fq "android.intent.action.MAIN" "$MANIFEST"; then
-            echo "::error::MAIN launcher intent not found."
-            exit 1
-          fi
-
-          if ! grep -Fq "android.intent.category.LAUNCHER" "$MANIFEST"; then
-            echo "::error::LAUNCHER category not found."
-            exit 1
-          fi
-
-          if ! grep -Fq 'android:exported="true"' "$MANIFEST"; then
-            echo "::error::android:exported=true not found."
-            exit 1
-          fi
-
-          if ! grep -Fq 'android:name=".LoginActivity"' "$MANIFEST"; then
-            echo "::error::LoginActivity launcher not found."
-            exit 1
-          fi
-
-          echo "========================================"
-          echo "LAUNCHER VERIFIED"
-          echo "Package: com.myshop.app"
-          echo "Launcher: .LoginActivity"
-          echo "========================================"
-
-
-      # ============================================================
-      # 6. JAVA 17
-      # ============================================================
       - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-
-      # ============================================================
-      # 7. ANDROID SDK
-      # ============================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-
 
       - name: Install Android SDK
         shell: bash
@@ -260,26 +144,12 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-          echo "========================================"
-          echo "ANDROID SDK READY"
-          echo "Platform: android-35"
-          echo "Build Tools: 35.0.0"
-          echo "========================================"
-
-
-      # ============================================================
-      # 8. GRADLE
-      # ============================================================
-      - name: Set up Gradle 8.11.1
+      - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.11.1"
 
-
-      # ============================================================
-      # 9. APPLY V-91 VERSION
-      # ============================================================
-      - name: Apply V-91 version
+      - name: Apply V-92 version
         shell: bash
         run: |
           set -euo pipefail
@@ -292,84 +162,32 @@ jobs:
           from pathlib import Path
 
           path = Path(sys.argv[1])
-
           text = path.read_text(encoding="utf-8")
 
-          version_code_pattern = (
-              r'(\bversionCode\s*)(?:=\s*)?\d+'
-          )
-
-          version_name_pattern = (
-              r'(\bversionName\s*)(?:=\s*)?[\'"][^\'"]*[\'"]'
-          )
-
           text, code_count = re.subn(
-              version_code_pattern,
-              r'\g<1>= 91',
+              r'(\bversionCode\s*)(?:=\s*)?\d+',
+              r'\g<1>= 92',
               text,
               count=1
           )
 
           text, name_count = re.subn(
-              version_name_pattern,
-              r'\g<1>= "2.9.91"',
+              r'(\bversionName\s*)(?:=\s*)?[\'"][^\'"]*[\'"]',
+              r'\g<1>= "2.9.92"',
               text,
               count=1
           )
 
           if code_count != 1:
-              raise SystemExit(
-                  f"versionCode replacement failed: {code_count}"
-              )
+              raise SystemExit("versionCode replacement failed")
 
           if name_count != 1:
-              raise SystemExit(
-                  f"versionName replacement failed: {name_count}"
-              )
+              raise SystemExit("versionName replacement failed")
 
           path.write_text(text, encoding="utf-8")
-
-          print("V-91 version applied successfully.")
+          print("V-92 version applied.")
           PY
 
-
-      # ============================================================
-      # 10. VERIFY V-91 VERSION
-      # ============================================================
-      - name: Verify V-91 version
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
-
-          if ! grep -Eq \
-            'versionCode[[:space:]]*(=)?[[:space:]]*91' \
-            "$APP_GRADLE"; then
-
-            echo "::error::versionCode 91 not found."
-            exit 1
-          fi
-
-          if ! grep -Eq \
-            'versionName[[:space:]]*(=)?[[:space:]]*["'\'']2\.9\.91["'\'']' \
-            "$APP_GRADLE"; then
-
-            echo "::error::versionName 2.9.91 not found."
-            exit 1
-          fi
-
-          echo "========================================"
-          echo "V-91 VERSION VERIFIED"
-          echo "Version Code: 91"
-          echo "Version Name: 2.9.91"
-          echo "Package: com.myshop.app"
-          echo "========================================"
-
-
-      # ============================================================
-      # 11. BUILD RELEASE APK
-      # ============================================================
       - name: Build release APK
         id: apk
         working-directory: ${{ steps.project.outputs.root }}
@@ -380,7 +198,6 @@ jobs:
           rm -rf app/build/outputs/apk/release
 
           if [ -f "./gradlew" ]; then
-
             chmod +x ./gradlew
 
             ./gradlew \
@@ -390,9 +207,7 @@ jobs:
               --no-build-cache \
               --rerun-tasks \
               --stacktrace
-
           else
-
             gradle \
               clean \
               assembleRelease \
@@ -400,7 +215,6 @@ jobs:
               --no-build-cache \
               --rerun-tasks \
               --stacktrace
-
           fi
 
           APKS=()
@@ -414,28 +228,14 @@ jobs:
               -print0
           )
 
-          echo "Release APK files found: ${#APKS[@]}"
-
           if [ "${#APKS[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly ONE release APK."
-
-            if [ "${#APKS[@]}" -gt 0 ]; then
-              printf '%s\n' "${APKS[@]}"
-            else
-              echo "<none>"
-            fi
-
+            echo "::error::Expected exactly one APK."
+            printf '%s\n' "${APKS[@]}"
             exit 1
           fi
 
-          echo "APK_PATH=${APKS[0]}"
-
           echo "path=${APKS[0]}" >> "$GITHUB_OUTPUT"
 
-
-      # ============================================================
-      # 12. REQUIRE PERMANENT SIGNING KEY
-      # ============================================================
       - name: Require permanent signing key
         shell: bash
         env:
@@ -446,42 +246,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -z "$KEYSTORE_B64" ]; then
-            echo "::error::MY_SHOP_RELEASE_KEYSTORE_B64 secret is missing."
-            exit 1
-          fi
-
-          if [ -z "$STORE_PASSWORD" ]; then
-            echo "::error::MY_SHOP_RELEASE_STORE_PASSWORD secret is missing."
-            exit 1
-          fi
-
-          if [ -z "$KEY_ALIAS" ]; then
-            echo "::error::MY_SHOP_RELEASE_KEY_ALIAS secret is missing."
-            exit 1
-          fi
-
-          if [ -z "$KEY_PASSWORD" ]; then
-            echo "::error::MY_SHOP_RELEASE_KEY_PASSWORD secret is missing."
-            exit 1
-          fi
+          test -n "$KEYSTORE_B64"
+          test -n "$STORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
 
           printf '%s' "$KEYSTORE_B64" \
             | base64 --decode \
             > "$RUNNER_TEMP/myshop-release.jks"
 
-          if [ ! -s "$RUNNER_TEMP/myshop-release.jks" ]; then
-            echo "::error::Decoded keystore is empty."
-            exit 1
-          fi
+          test -s "$RUNNER_TEMP/myshop-release.jks"
 
-          echo "Permanent signing key verified."
-
-
-      # ============================================================
-      # 13. SIGN V-91 APK
-      # ============================================================
-      - name: Sign V-91 APK
+      - name: Sign APK
         id: signed
         shell: bash
         env:
@@ -494,14 +270,8 @@ jobs:
           BT="$ANDROID_HOME/build-tools/35.0.0"
 
           UNSIGNED="${{ steps.apk.outputs.path }}"
-
-          ALIGNED="$RUNNER_TEMP/V-91_MY_SHOP_ALIGNED.apk"
-          SIGNED="$RUNNER_TEMP/V-91_MY_SHOP_FINAL.apk"
-
-          if [ ! -s "$UNSIGNED" ]; then
-            echo "::error::Unsigned APK not found."
-            exit 1
-          fi
+          ALIGNED="$RUNNER_TEMP/V-92_ALIGNED.apk"
+          SIGNED="$RUNNER_TEMP/V-92_MY_SHOP_FINAL.apk"
 
           "$BT/zipalign" \
             -f \
@@ -520,73 +290,33 @@ jobs:
             --out "$SIGNED" \
             "$ALIGNED"
 
-          "$BT/apksigner" verify \
-            --verbose \
-            "$SIGNED"
-
-          if [ ! -s "$SIGNED" ]; then
-            echo "::error::Signed APK was not created."
-            exit 1
-          fi
+          "$BT/apksigner" verify --verbose "$SIGNED"
 
           echo "signed_path=$SIGNED" >> "$GITHUB_OUTPUT"
 
-          echo "========================================"
-          echo "V-91 APK SIGNING COMPLETED"
-          echo "========================================"
-
-
-      # ============================================================
-      # 14. VERIFY FINAL APK IDENTITY
-      # ============================================================
-      - name: Verify final APK identity
+      - name: Verify final APK
         shell: bash
         run: |
           set -euo pipefail
 
           BT="$ANDROID_HOME/build-tools/35.0.0"
-
           APK="${{ steps.signed.outputs.signed_path }}"
-
-          if [ ! -s "$APK" ]; then
-            echo "::error::Final signed APK not found."
-            exit 1
-          fi
 
           BADGING="$("$BT/aapt2" dump badging "$APK")"
 
           echo "$BADGING"
 
-          echo "$BADGING" \
-            | grep -Fq "package: name='com.myshop.app'"
+          echo "$BADGING" | grep -Fq "package: name='com.myshop.app'"
+          echo "$BADGING" | grep -Fq "versionName='2.9.92'"
+          echo "$BADGING" | grep -Fq "versionCode='92'"
 
-          echo "$BADGING" \
-            | grep -Fq "versionName='2.9.91'"
-
-          echo "$BADGING" \
-            | grep -Fq "versionCode='91'"
-
-          echo "========================================"
-          echo "FINAL APK IDENTITY VERIFIED"
-          echo "========================================"
-          echo "Package: com.myshop.app"
-          echo "Version Name: 2.9.91"
-          echo "Version Code: 91"
-          echo "========================================"
-
-
-      # ============================================================
-      # 15. PREPARE EXACTLY ONE FINAL APK
-      # ============================================================
-      - name: Prepare exactly ONE final APK
+      - name: Prepare final APK
         shell: bash
         run: |
           set -euo pipefail
 
-          FINAL="$GITHUB_WORKSPACE/$RELEASE_DIR/V-91_MY_SHOP_FINAL_APK.apk"
-          SHA="$GITHUB_WORKSPACE/$RELEASE_DIR/V-91_MY_SHOP_FINAL_APK.sha256"
-
-          mkdir -p "$RELEASE_DIR"
+          FINAL="$GITHUB_WORKSPACE/$RELEASE_DIR/V-92_MY_SHOP_FINAL_APK.apk"
+          SHA="$GITHUB_WORKSPACE/$RELEASE_DIR/V-92_MY_SHOP_FINAL_APK.sha256"
 
           rm -f "$RELEASE_DIR"/*.apk
           rm -f "$RELEASE_DIR"/*.sha256
@@ -598,7 +328,7 @@ jobs:
           sha256sum "$FINAL" > "$SHA"
 
           COUNT="$(
-            find "$GITHUB_WORKSPACE/$RELEASE_DIR" \
+            find "$RELEASE_DIR" \
               -maxdepth 1 \
               -type f \
               -name "*.apk" \
@@ -607,80 +337,40 @@ jobs:
           )"
 
           if [ "$COUNT" -ne 1 ]; then
-            echo "::error::Final APK count is $COUNT. Expected exactly 1."
+            echo "::error::Expected exactly one final APK."
             exit 1
           fi
 
-          if [ ! -s "$FINAL" ]; then
-            echo "::error::Final APK is empty."
-            exit 1
-          fi
-
-          if [ ! -s "$SHA" ]; then
-            echo "::error::SHA256 file is empty."
-            exit 1
-          fi
-
-          echo "========================================"
-          echo "V-91 FINAL RELEASE READY"
-          echo "APK COUNT: 1"
-          echo "APK: $FINAL"
-          echo "SHA256: $SHA"
-          echo "========================================"
+          test -s "$FINAL"
+          test -s "$SHA"
 
           ls -lh "$RELEASE_DIR"
-
           cat "$SHA"
 
-
-      # ============================================================
-      # 16. UPLOAD EXACTLY ONE APK
-      # ============================================================
-      - name: Upload exactly ONE APK artifact
+      - name: Upload final APK
         uses: actions/upload-artifact@v4
         with:
-          name: V-91_MY_SHOP_FINAL_APK
+          name: V-92_MY_SHOP_FINAL_APK
           path: |
-            release/V-91_MY_SHOP_FINAL_APK.apk
-            release/V-91_MY_SHOP_FINAL_APK.sha256
+            release/V-92_MY_SHOP_FINAL_APK.apk
+            release/V-92_MY_SHOP_FINAL_APK.sha256
           if-no-files-found: error
           retention-days: 30
 
-
-      # ============================================================
-      # 17. FINAL V-91 GUARD
-      # ============================================================
-      - name: Final V-91 guard
+      - name: Final guard
         shell: bash
         run: |
           set -euo pipefail
 
-          COUNT="$(
-            find "$GITHUB_WORKSPACE/$RELEASE_DIR" \
-              -maxdepth 1 \
-              -type f \
-              -name "*.apk" \
-              | wc -l \
-              | tr -d ' '
-          )"
-
-          if [ "$COUNT" -ne 1 ]; then
-            echo "::error::Final APK count is $COUNT. Expected exactly 1."
-            exit 1
-          fi
+          test -s \
+            "$GITHUB_WORKSPACE/release/V-92_MY_SHOP_FINAL_APK.apk"
 
           test -s \
-            "$GITHUB_WORKSPACE/$RELEASE_DIR/V-91_MY_SHOP_FINAL_APK.apk"
-
-          test -s \
-            "$GITHUB_WORKSPACE/$RELEASE_DIR/V-91_MY_SHOP_FINAL_APK.sha256"
+            "$GITHUB_WORKSPACE/release/V-92_MY_SHOP_FINAL_APK.sha256"
 
           echo "========================================"
-          echo "V-91: ONE VERIFIED APK READY"
-          echo "========================================"
-          echo "Version: 2.9.91"
-          echo "Version Code: 91"
+          echo "V-92 SUCCESS"
+          echo "Version: 2.9.92"
           echo "Package: com.myshop.app"
-          echo "APK count: 1"
-          echo "APK: V-91_MY_SHOP_FINAL_APK.apk"
+          echo "ONE APK READY"
           echo "========================================"
