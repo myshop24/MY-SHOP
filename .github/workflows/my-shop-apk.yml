@@ -1,1 +1,380 @@
+name: V-92 MY SHOP STABILITY BUILD
 
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: my-shop-v92-stability
+  cancel-in-progress: true
+
+env:
+  VERSION_NUMBER: "92"
+  VERSION_NAME: "2.9.92"
+  PACKAGE_NAME: "com.myshop.app"
+  SOURCE_ZIP: "V-91_MY_SHOP_FULL_PROJECT_SOURCE.zip"
+  SOURCE_DIR: "v92_source"
+  RELEASE_DIR: "release"
+
+jobs:
+  build:
+    name: V-92 - OPEN LOGIN VERIFIED APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f "$SOURCE_ZIP"
+          test -s "$SOURCE_ZIP"
+
+          echo "SOURCE ZIP:"
+          ls -lh "$SOURCE_ZIP"
+          sha256sum "$SOURCE_ZIP"
+
+      - name: Extract source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "$SOURCE_DIR" "$RELEASE_DIR"
+
+          mkdir -p "$SOURCE_DIR"
+          mkdir -p "$RELEASE_DIR"
+
+          unzip -q "$SOURCE_ZIP" -d "$SOURCE_DIR"
+
+          echo "SOURCE EXTRACTED"
+
+      - name: Locate Android project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -d '' SETTINGS < <(
+            find "$SOURCE_DIR" \
+              -type f \
+              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+              -not -path "*/build/*" \
+              -not -path "*/.gradle/*" \
+              -print0
+          )
+
+          if [ "${#SETTINGS[@]}" -ne 1 ]; then
+            echo "::error::Android project detection failed."
+            printf '%s\n' "${SETTINGS[@]}"
+            exit 1
+          fi
+
+          ROOT="$(dirname "${SETTINGS[0]}")"
+
+          if [ -f "$ROOT/app/build.gradle" ]; then
+            APP_GRADLE="$ROOT/app/build.gradle"
+          elif [ -f "$ROOT/app/build.gradle.kts" ]; then
+            APP_GRADLE="$ROOT/app/build.gradle.kts"
+          else
+            echo "::error::app/build.gradle not found."
+            exit 1
+          fi
+
+          MANIFEST="$ROOT/app/src/main/AndroidManifest.xml"
+
+          if [ ! -s "$MANIFEST" ]; then
+            echo "::error::AndroidManifest.xml not found."
+            exit 1
+          fi
+
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "app_gradle=$APP_GRADLE" >> "$GITHUB_OUTPUT"
+          echo "manifest=$MANIFEST" >> "$GITHUB_OUTPUT"
+
+          echo "ANDROID ROOT: $ROOT"
+
+      - name: Verify package and launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
+          MANIFEST="${{ steps.project.outputs.manifest }}"
+
+          grep -Eq \
+            "applicationId[[:space:]]*(=)?[[:space:]]*['\"]com\.myshop\.app['\"]" \
+            "$APP_GRADLE"
+
+          grep -Fq "android.intent.action.MAIN" "$MANIFEST"
+          grep -Fq "android.intent.category.LAUNCHER" "$MANIFEST"
+
+          echo "PACKAGE: com.myshop.app"
+          echo "LAUNCHER: OK"
+
+      - name: Remove invalid dashboard reference resource
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="${{ steps.project.outputs.root }}"
+
+          find "$ROOT/app/src/main/res" \
+            -type f \
+            -name "myshop_dashboard_reference.png" \
+            -delete 2>/dev/null || true
+
+          find "$ROOT/app/src/main/res" \
+            -type f \
+            -name "*dashboard*reference*" \
+            -delete 2>/dev/null || true
+
+          echo "Invalid dashboard reference resources cleaned."
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Apply V-92 version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
+
+          python3 - "$APP_GRADLE" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8")
+
+          code = re.sub(
+              r'(\bversionCode\s*(?:=\s*)?)\d+',
+              r'\g<1>92',
+              text,
+              count=1
+          )
+
+          name = re.sub(
+              r'(\bversionName\s*(?:=\s*)?)[\'"][^\'"]*[\'"]',
+              r'\g<1>"2.9.92"',
+              code,
+              count=1
+          )
+
+          if code == text:
+              raise SystemExit("versionCode was not found")
+
+          if name == code:
+              raise SystemExit("versionName was not found")
+
+          path.write_text(name, encoding="utf-8")
+
+          print("versionCode = 92")
+          print("versionName = 2.9.92")
+          PY
+
+      - name: Build release APK
+        id: apk
+        working-directory: ${{ steps.project.outputs.root }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf app/build/outputs/apk/release
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+
+            ./gradlew \
+              clean \
+              :app:assembleRelease \
+              --no-daemon \
+              --no-build-cache \
+              --rerun-tasks \
+              --stacktrace
+          else
+            gradle \
+              clean \
+              :app:assembleRelease \
+              --no-daemon \
+              --no-build-cache \
+              --rerun-tasks \
+              --stacktrace
+          fi
+
+          mapfile -d '' APKS < <(
+            find app/build/outputs/apk/release \
+              -type f \
+              -name "*.apk" \
+              -print0
+          )
+
+          if [ "${#APKS[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one APK."
+            printf '%s\n' "${APKS[@]}"
+            exit 1
+          fi
+
+          echo "path=${APKS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Require permanent signing key
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.MY_SHOP_RELEASE_KEYSTORE_B64 }}
+          STORE_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MY_SHOP_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          test -n "$KEYSTORE_B64"
+          test -n "$STORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+
+          printf '%s' "$KEYSTORE_B64" \
+            | base64 --decode \
+            > "$RUNNER_TEMP/myshop-release.jks"
+
+          test -s "$RUNNER_TEMP/myshop-release.jks"
+
+      - name: Sign APK
+        id: signed
+        shell: bash
+        env:
+          STORE_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MY_SHOP_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.MY_SHOP_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+
+          UNSIGNED="${{ steps.apk.outputs.path }}"
+          ALIGNED="$RUNNER_TEMP/V-92_ALIGNED.apk"
+          SIGNED="$RUNNER_TEMP/V-92_MY_SHOP_FINAL.apk"
+
+          "$BT/zipalign" \
+            -f \
+            -p 4 \
+            "$UNSIGNED" \
+            "$ALIGNED"
+
+          "$BT/apksigner" sign \
+            --ks "$RUNNER_TEMP/myshop-release.jks" \
+            --ks-pass env:STORE_PASSWORD \
+            --key-pass env:KEY_PASSWORD \
+            --ks-key-alias "$KEY_ALIAS" \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out "$SIGNED" \
+            "$ALIGNED"
+
+          "$BT/apksigner" verify --verbose "$SIGNED"
+
+          echo "signed_path=$SIGNED" >> "$GITHUB_OUTPUT"
+
+      - name: Verify final APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          APK="${{ steps.signed.outputs.signed_path }}"
+
+          BADGING="$("$BT/aapt2" dump badging "$APK")"
+
+          echo "$BADGING"
+
+          echo "$BADGING" | grep -Fq \
+            "package: name='com.myshop.app'"
+
+          echo "$BADGING" | grep -Fq \
+            "versionName='2.9.92'"
+
+          echo "$BADGING" | grep -Fq \
+            "versionCode='92'"
+
+      - name: Prepare final APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FINAL="$GITHUB_WORKSPACE/$RELEASE_DIR/V-92_MY_SHOP_FINAL_APK.apk"
+          SHA="$GITHUB_WORKSPACE/$RELEASE_DIR/V-92_MY_SHOP_FINAL_APK.sha256"
+
+          rm -f "$RELEASE_DIR"/*.apk
+          rm -f "$RELEASE_DIR"/*.sha256
+
+          cp \
+            "${{ steps.signed.outputs.signed_path }}" \
+            "$FINAL"
+
+          sha256sum "$FINAL" > "$SHA"
+
+          test -s "$FINAL"
+          test -s "$SHA"
+
+          echo "FINAL APK READY"
+          ls -lh "$RELEASE_DIR"
+          cat "$SHA"
+
+      - name: Upload final APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: V-92_MY_SHOP_FINAL_APK
+          path: |
+            release/V-92_MY_SHOP_FINAL_APK.apk
+            release/V-92_MY_SHOP_FINAL_APK.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Final guard
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s \
+            "$GITHUB_WORKSPACE/release/V-92_MY_SHOP_FINAL_APK.apk"
+
+          test -s \
+            "$GITHUB_WORKSPACE/release/V-92_MY_SHOP_FINAL_APK.sha256"
+
+          echo "========================================"
+          echo "V-92 SUCCESS"
+          echo "Version: 2.9.92"
+          echo "Package: com.myshop.app"
+          echo "ONE APK READY"
+          echo "========================================"
+```0
