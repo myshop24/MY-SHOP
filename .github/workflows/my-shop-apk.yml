@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 45
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -33,10 +34,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          test -f "$SOURCE_ZIP"
-          test -s "$SOURCE_ZIP"
+          if [ ! -f "$SOURCE_ZIP" ]; then
+            echo "::error::Source ZIP not found: $SOURCE_ZIP"
+            exit 1
+          fi
 
-          echo "SOURCE ZIP:"
+          if [ ! -s "$SOURCE_ZIP" ]; then
+            echo "::error::Source ZIP is empty."
+            exit 1
+          fi
+
+          echo "SOURCE ZIP FOUND"
           ls -lh "$SOURCE_ZIP"
           sha256sum "$SOURCE_ZIP"
 
@@ -45,7 +53,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          rm -rf "$SOURCE_DIR" "$RELEASE_DIR"
+          rm -rf "$SOURCE_DIR"
+          rm -rf "$RELEASE_DIR"
 
           mkdir -p "$SOURCE_DIR"
           mkdir -p "$RELEASE_DIR"
@@ -70,7 +79,7 @@ jobs:
           )
 
           if [ "${#SETTINGS[@]}" -ne 1 ]; then
-            echo "::error::Android project detection failed."
+            echo "::error::Expected exactly one Android project."
             printf '%s\n' "${SETTINGS[@]}"
             exit 1
           fi
@@ -82,7 +91,7 @@ jobs:
           elif [ -f "$ROOT/app/build.gradle.kts" ]; then
             APP_GRADLE="$ROOT/app/build.gradle.kts"
           else
-            echo "::error::app/build.gradle not found."
+            echo "::error::App Gradle file not found."
             exit 1
           fi
 
@@ -98,6 +107,8 @@ jobs:
           echo "manifest=$MANIFEST" >> "$GITHUB_OUTPUT"
 
           echo "ANDROID ROOT: $ROOT"
+          echo "APP GRADLE: $APP_GRADLE"
+          echo "MANIFEST: $MANIFEST"
 
       - name: Verify package and launcher
         shell: bash
@@ -107,34 +118,25 @@ jobs:
           APP_GRADLE="${{ steps.project.outputs.app_gradle }}"
           MANIFEST="${{ steps.project.outputs.manifest }}"
 
-          grep -Eq \
+          if ! grep -Eq \
             "applicationId[[:space:]]*(=)?[[:space:]]*['\"]com\.myshop\.app['\"]" \
-            "$APP_GRADLE"
+            "$APP_GRADLE"; then
+            echo "::error::Package name com.myshop.app not found."
+            exit 1
+          fi
 
-          grep -Fq "android.intent.action.MAIN" "$MANIFEST"
-          grep -Fq "android.intent.category.LAUNCHER" "$MANIFEST"
+          if ! grep -Fq "android.intent.action.MAIN" "$MANIFEST"; then
+            echo "::error::MAIN launcher not found."
+            exit 1
+          fi
+
+          if ! grep -Fq "android.intent.category.LAUNCHER" "$MANIFEST"; then
+            echo "::error::LAUNCHER category not found."
+            exit 1
+          fi
 
           echo "PACKAGE: com.myshop.app"
           echo "LAUNCHER: OK"
-
-      - name: Remove invalid dashboard reference resource
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ROOT="${{ steps.project.outputs.root }}"
-
-          find "$ROOT/app/src/main/res" \
-            -type f \
-            -name "myshop_dashboard_reference.png" \
-            -delete 2>/dev/null || true
-
-          find "$ROOT/app/src/main/res" \
-            -type f \
-            -name "*dashboard*reference*" \
-            -delete 2>/dev/null || true
-
-          echo "Invalid dashboard reference resources cleaned."
 
       - name: Set up Java 17
         uses: actions/setup-java@v5
@@ -157,6 +159,8 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0"
 
+          echo "ANDROID SDK READY"
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -177,31 +181,60 @@ jobs:
           path = Path(sys.argv[1])
           text = path.read_text(encoding="utf-8")
 
-          code = re.sub(
-              r'(\bversionCode\s*(?:=\s*)?)\d+',
+          original = text
+
+          text, code_count = re.subn(
+              r'(\bversionCode\s*(?:=|\s+)?)\d+',
               r'\g<1>92',
               text,
               count=1
           )
 
-          name = re.sub(
-              r'(\bversionName\s*(?:=\s*)?)[\'"][^\'"]*[\'"]',
+          text, name_count = re.subn(
+              r'(\bversionName\s*(?:=|\s+)?)[\'"][^\'"]*[\'"]',
               r'\g<1>"2.9.92"',
-              code,
+              text,
               count=1
           )
 
-          if code == text:
-              raise SystemExit("versionCode was not found")
+          if code_count != 1:
+              raise SystemExit(
+                  "ERROR: versionCode could not be updated."
+              )
 
-          if name == code:
-              raise SystemExit("versionName was not found")
+          if name_count != 1:
+              raise SystemExit(
+                  "ERROR: versionName could not be updated."
+              )
 
-          path.write_text(name, encoding="utf-8")
+          if text == original:
+              raise SystemExit(
+                  "ERROR: Gradle file was not changed."
+              )
+
+          path.write_text(text, encoding="utf-8")
 
           print("versionCode = 92")
           print("versionName = 2.9.92")
           PY
+
+      - name: Check Android resources
+        working-directory: ${{ steps.project.outputs.root }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking Android resources..."
+
+          if [ -d "app/src/main/res" ]; then
+            find app/src/main/res \
+              -type f \
+              -print \
+              | sort \
+              | head -200
+          fi
+
+          echo "RESOURCE CHECK COMPLETE"
 
       - name: Build release APK
         id: apk
@@ -210,9 +243,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          rm -rf app/build/outputs/apk/release
+          rm -rf app/build
 
           if [ -f "./gradlew" ]; then
+
             chmod +x ./gradlew
 
             ./gradlew \
@@ -221,15 +255,20 @@ jobs:
               --no-daemon \
               --no-build-cache \
               --rerun-tasks \
-              --stacktrace
+              --stacktrace \
+              --warning-mode all
+
           else
+
             gradle \
               clean \
               :app:assembleRelease \
               --no-daemon \
               --no-build-cache \
               --rerun-tasks \
-              --stacktrace
+              --stacktrace \
+              --warning-mode all
+
           fi
 
           mapfile -d '' APKS < <(
@@ -241,9 +280,14 @@ jobs:
 
           if [ "${#APKS[@]}" -ne 1 ]; then
             echo "::error::Expected exactly one APK."
+
             printf '%s\n' "${APKS[@]}"
+
             exit 1
           fi
+
+          echo "APK FOUND:"
+          echo "${APKS[0]}"
 
           echo "path=${APKS[0]}" >> "$GITHUB_OUTPUT"
 
@@ -257,16 +301,36 @@ jobs:
         run: |
           set -euo pipefail
 
-          test -n "$KEYSTORE_B64"
-          test -n "$STORE_PASSWORD"
-          test -n "$KEY_ALIAS"
-          test -n "$KEY_PASSWORD"
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::error::MY_SHOP_RELEASE_KEYSTORE_B64 secret missing."
+            exit 1
+          fi
+
+          if [ -z "$STORE_PASSWORD" ]; then
+            echo "::error::MY_SHOP_RELEASE_STORE_PASSWORD secret missing."
+            exit 1
+          fi
+
+          if [ -z "$KEY_ALIAS" ]; then
+            echo "::error::MY_SHOP_RELEASE_KEY_ALIAS secret missing."
+            exit 1
+          fi
+
+          if [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::MY_SHOP_RELEASE_KEY_PASSWORD secret missing."
+            exit 1
+          fi
 
           printf '%s' "$KEYSTORE_B64" \
             | base64 --decode \
             > "$RUNNER_TEMP/myshop-release.jks"
 
-          test -s "$RUNNER_TEMP/myshop-release.jks"
+          if [ ! -s "$RUNNER_TEMP/myshop-release.jks" ]; then
+            echo "::error::Release keystore is invalid or empty."
+            exit 1
+          fi
+
+          echo "PERMANENT SIGNING KEY READY"
 
       - name: Sign APK
         id: signed
@@ -301,7 +365,11 @@ jobs:
             --out "$SIGNED" \
             "$ALIGNED"
 
-          "$BT/apksigner" verify --verbose "$SIGNED"
+          "$BT/apksigner" verify \
+            --verbose \
+            "$SIGNED"
+
+          echo "SIGNED APK READY"
 
           echo "signed_path=$SIGNED" >> "$GITHUB_OUTPUT"
 
@@ -317,14 +385,16 @@ jobs:
 
           echo "$BADGING"
 
-          echo "$BADGING" | grep -Fq \
-            "package: name='com.myshop.app'"
+          echo "$BADGING" \
+            | grep -Fq "package: name='com.myshop.app'"
 
-          echo "$BADGING" | grep -Fq \
-            "versionName='2.9.92'"
+          echo "$BADGING" \
+            | grep -Fq "versionName='2.9.92'"
 
-          echo "$BADGING" | grep -Fq \
-            "versionCode='92'"
+          echo "$BADGING" \
+            | grep -Fq "versionCode='92'"
+
+          echo "FINAL APK VERIFIED"
 
       - name: Prepare final APK
         shell: bash
@@ -343,11 +413,22 @@ jobs:
 
           sha256sum "$FINAL" > "$SHA"
 
-          test -s "$FINAL"
-          test -s "$SHA"
+          if [ ! -s "$FINAL" ]; then
+            echo "::error::Final APK is empty."
+            exit 1
+          fi
 
+          if [ ! -s "$SHA" ]; then
+            echo "::error::SHA256 file was not created."
+            exit 1
+          fi
+
+          echo "========================================"
           echo "FINAL APK READY"
+          echo "========================================"
+
           ls -lh "$RELEASE_DIR"
+
           cat "$SHA"
 
       - name: Upload final APK
@@ -377,4 +458,3 @@ jobs:
           echo "Package: com.myshop.app"
           echo "ONE APK READY"
           echo "========================================"
-```0
