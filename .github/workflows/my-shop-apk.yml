@@ -1,4 +1,4 @@
-name: MY SHOP AUTO BUILD
+name: MY SHOP FINAL BUILD
 
 on:
   push:
@@ -10,13 +10,14 @@ permissions:
 
 jobs:
   build:
-    name: MY SHOP BUILD
+    name: MY SHOP FINAL RELEASE
     runs-on: ubuntu-latest
 
     env:
       MYSHOP_BACKEND_URL: https://rapid-bush-62ea.myshopsatkania.workers.dev
 
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -25,71 +26,87 @@ jobs:
         run: |
           set -euo pipefail
 
-          best=""
-          ver=-1
+          BEST=""
+          VERSION=-1
 
           shopt -s nullglob
-          for f in V-*.zip V_*.zip; do
-            if [[ "$f" =~ ^V[-_]([0-9]+)-.*\.zip$ ]]; then
-              n=$((10#${BASH_REMATCH[1]}))
 
-              if (( n > ver )); then
-                ver="$n"
-                best="$f"
+          for FILE in V-*.zip V_*.zip; do
+            if [[ "$FILE" =~ ^V[-_]([0-9]+)-.*\.zip$ ]]; then
+
+              NUMBER=$((10#${BASH_REMATCH[1]}))
+
+              if (( NUMBER > VERSION )); then
+                VERSION="$NUMBER"
+                BEST="$FILE"
               fi
+
             fi
           done
 
-          if [ -z "$best" ]; then
+          if [ -z "$BEST" ]; then
             echo "ERROR: No V-numbered source ZIP found."
             exit 1
           fi
 
-          echo "SOURCE_ZIP=$best" >> "$GITHUB_ENV"
-          echo "SOURCE_VERSION=$ver" >> "$GITHUB_ENV"
+          echo "SOURCE_ZIP=$BEST" >> "$GITHUB_ENV"
+          echo "SOURCE_VERSION=$VERSION" >> "$GITHUB_ENV"
 
-          echo "Using source: $best (V-$ver)"
+          echo "========================================"
+          echo "SOURCE ZIP: $BEST"
+          echo "SOURCE VERSION: V-$VERSION"
+          echo "========================================"
 
       - name: Extract source
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf source release
-          mkdir -p source release
+          rm -rf source
+          rm -rf release
+
+          mkdir -p source
+          mkdir -p release
 
           unzip -q "$SOURCE_ZIP" -d source
+
+          echo "Source extracted successfully."
 
       - name: Find Android project
         shell: bash
         run: |
           set -euo pipefail
 
-          PROJECT_FILE="$(
-            find source -type f \
-              \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
-              -print -quit
-          )
+          PROJECT_FILE="$(find source -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -print -quit)"
 
           if [ -z "$PROJECT_FILE" ]; then
             echo "ERROR: Android project not found."
-            echo "Files found in source:"
-            find source -maxdepth 5 -type f | head -200
+            echo ""
+            echo "Files found:"
+            find source -maxdepth 6 -type f | head -200
             exit 1
           fi
 
           PROJECT="$(dirname "$PROJECT_FILE")"
 
+          echo "Android project: $PROJECT"
+
           if [ ! -d "$PROJECT/app" ]; then
-            echo "ERROR: Android project found, but app module was not found: $PROJECT"
-            find "$PROJECT" -maxdepth 3 -type f | head -200
+            echo "ERROR: app module not found: $PROJECT"
+            echo ""
+            echo "Project files:"
+            find "$PROJECT" -maxdepth 4 -type f | head -200
             exit 1
           fi
 
-          echo "Android project found at: $PROJECT"
           echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
 
-      - name: Fix BuildConfig and backend URL
+          echo "========================================"
+          echo "ANDROID PROJECT FOUND"
+          echo "PROJECT=$PROJECT"
+          echo "========================================"
+
+      - name: Fix BuildConfig backend URL and version
         shell: bash
         run: |
           set -euo pipefail
@@ -105,16 +122,51 @@ jobs:
             exit 1
           fi
 
-          python3 - "$FILE" "$MYSHOP_BACKEND_URL" <<'PY'
+          python3 - "$FILE" "$MYSHOP_BACKEND_URL" "$SOURCE_VERSION" <<'PY'
           import sys
           import re
 
           path = sys.argv[1]
           backend = sys.argv[2]
+          version = int(sys.argv[3])
 
-          s = open(path, encoding="utf-8").read()
+          with open(path, encoding="utf-8") as f:
+              s = f.read()
 
           if path.endswith(".gradle"):
+
+              if re.search(r'\bversionCode\s+\d+', s):
+                  s = re.sub(
+                      r'\bversionCode\s+\d+',
+                      f'versionCode {version}',
+                      s,
+                      count=1
+                  )
+              else:
+                  s = re.sub(
+                      r'(\bdefaultConfig\s*\{)',
+                      rf'\1\n        versionCode {version}',
+                      s,
+                      count=1
+                  )
+
+              if re.search(
+                  r'\bversionName\s+[\'"][^\'"]+[\'"]',
+                  s
+              ):
+                  s = re.sub(
+                      r'\bversionName\s+[\'"][^\'"]+[\'"]',
+                      f'versionName "2.9.{version}"',
+                      s,
+                      count=1
+                  )
+              else:
+                  s = re.sub(
+                      r'(\bdefaultConfig\s*\{)',
+                      rf'\1\n        versionName "2.9.{version}"',
+                      s,
+                      count=1
+                  )
 
               if "buildFeatures" not in s or "buildConfig true" not in s:
                   s = re.sub(
@@ -124,12 +176,6 @@ jobs:
                       count=1
                   )
 
-              field = (
-                  "        buildConfigField 'String', "
-                  "'MYSHOP_BACKEND_URL', '\"%s\"'\n"
-                  % backend.replace("\\", "\\\\").replace('"', '\\"')
-              )
-
               s = re.sub(
                   r'^[ \t]*buildConfigField\s+.*MYSHOP_BACKEND_URL.*\n?',
                   '',
@@ -137,30 +183,100 @@ jobs:
                   flags=re.MULTILINE
               )
 
-              m = re.search(r'(\bdefaultConfig\s*\{)', s)
+              m = re.search(
+                  r'(\bdefaultConfig\s*\{)',
+                  s
+              )
 
               if not m:
                   raise SystemExit(
-                      "defaultConfig block not found in app/build.gradle"
+                      "ERROR: defaultConfig block not found"
                   )
 
-              insert_at = m.end()
+              escaped = (
+                  backend
+                  .replace("\\", "\\\\")
+                  .replace('"', '\\"')
+              )
+
+              field = (
+                  "        buildConfigField 'String', "
+                  "'MYSHOP_BACKEND_URL', '\""
+                  + escaped
+                  + "\"'\n"
+              )
 
               s = (
-                  s[:insert_at]
+                  s[:m.end()]
                   + "\n"
                   + field
-                  + s[insert_at:]
+                  + s[m.end():]
               )
 
           else:
 
-              if "buildFeatures" not in s or "buildConfig = true" not in s:
+              if re.search(
+                  r'\bversionCode\s*=\s*\d+',
+                  s
+              ):
+                  s = re.sub(
+                      r'\bversionCode\s*=\s*\d+',
+                      f'versionCode = {version}',
+                      s,
+                      count=1
+                  )
+              else:
+                  s = re.sub(
+                      r'(\bdefaultConfig\s*\{)',
+                      rf'\1\n        versionCode = {version}',
+                      s,
+                      count=1
+                  )
+
+              if re.search(
+                  r'\bversionName\s*=\s*[\'"][^\'"]+[\'"]',
+                  s
+              ):
+                  s = re.sub(
+                      r'\bversionName\s*=\s*[\'"][^\'"]+[\'"]',
+                      f'versionName = "2.9.{version}"',
+                      s,
+                      count=1
+                  )
+              else:
+                  s = re.sub(
+                      r'(\bdefaultConfig\s*\{)',
+                      rf'\1\n        versionName = "2.9.{version}"',
+                      s,
+                      count=1
+                  )
+
+              if (
+                  "buildFeatures" not in s
+                  or "buildConfig = true" not in s
+              ):
                   s = re.sub(
                       r'(\bandroid\s*\{)',
                       r'\1\n    buildFeatures { buildConfig = true }',
                       s,
                       count=1
+                  )
+
+              s = re.sub(
+                  r'^[ \t]*buildConfigField\s*\(\s*"String"\s*,\s*"MYSHOP_BACKEND_URL".*\n?',
+                  '',
+                  s,
+                  flags=re.MULTILINE
+              )
+
+              m = re.search(
+                  r'(\bdefaultConfig\s*\{)',
+                  s
+              )
+
+              if not m:
+                  raise SystemExit(
+                      "ERROR: defaultConfig block not found"
                   )
 
               escaped = (
@@ -171,37 +287,31 @@ jobs:
 
               field = (
                   '        buildConfigField('
-                  '"String", "MYSHOP_BACKEND_URL", "\\"%s\\""'
+                  '"String", '
+                  '"MYSHOP_BACKEND_URL", '
+                  '"\\"'
+                  + escaped
+                  + '\\""'
                   ')\n'
-                  % escaped
               )
-
-              s = re.sub(
-                  r'^[ \t]*buildConfigField\s*\(\s*"String"\s*,\s*"MYSHOP_BACKEND_URL".*\n?',
-                  '',
-                  s,
-                  flags=re.MULTILINE
-              )
-
-              m = re.search(r'(\bdefaultConfig\s*\{)', s)
-
-              if not m:
-                  raise SystemExit(
-                      "defaultConfig block not found in app/build.gradle.kts"
-                  )
-
-              insert_at = m.end()
 
               s = (
-                  s[:insert_at]
+                  s[:m.end()]
                   + "\n"
                   + field
-                  + s[insert_at:]
+                  + s[m.end():]
               )
 
-          open(path, "w", encoding="utf-8").write(s)
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(s)
 
-          print("BuildConfig/backend URL prepared:", path)
+          print(
+              f"Prepared {path}: "
+              f"versionCode={version}, "
+              f"versionName=2.9.{version}"
+          )
+
+          print("Backend URL prepared.")
           PY
 
       - name: Setup Java
@@ -210,15 +320,15 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Android
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK
+      - name: Install Android SDK packages
         shell: bash
         run: |
           set -euo pipefail
 
-          sdkmanager \
+          sdkmanager --install \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
@@ -241,54 +351,69 @@ jobs:
 
           mkdir -p .signing
 
-          if [ ! -f .signing/myshop-release.jks ]; then
+          if [ ! -f ".signing/myshop-release.jks" ]; then
+
+            echo "Creating MY SHOP signing key..."
 
             keytool -genkeypair -v \
-              -keystore .signing/myshop-release.jks \
-              -storepass myshop-release-2026 \
-              -keypass myshop-release-2026 \
-              -alias myshop \
+              -keystore ".signing/myshop-release.jks" \
+              -storepass "myshop-release-2026" \
+              -keypass "myshop-release-2026" \
+              -alias "myshop" \
               -keyalg RSA \
               -keysize 2048 \
               -validity 10000 \
               -dname "CN=MY SHOP, OU=App, O=MY SHOP, L=Satkania, ST=Chattogram, C=BD"
 
+          else
+
+            echo "Existing MY SHOP signing key restored."
+
           fi
 
           keytool -list \
-            -keystore .signing/myshop-release.jks \
-            -storepass myshop-release-2026 \
-            -alias myshop >/dev/null
+            -keystore ".signing/myshop-release.jks" \
+            -storepass "myshop-release-2026" \
+            -alias "myshop" \
+            >/dev/null
 
-      - name: Build unsigned release APK
+          echo "Signing key is ready."
+
+      - name: Build exactly one release APK
         working-directory: ${{ env.PROJECT }}
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "========================================"
+          echo "BUILDING MY SHOP V-$SOURCE_VERSION"
+          echo "========================================"
 
           gradle clean :app:assembleRelease \
             --no-daemon \
             --no-build-cache \
             --rerun-tasks
 
-          mapfile -t APKs < <(
+          mapfile -t APK_FILES < <(
             find app/build/outputs/apk \
               -type f \
               -name "*.apk" \
               -print
           )
 
-          if [ "${#APKs[@]}" -ne 1 ]; then
-            echo "ERROR: source build produced ${#APKs[@]} APK files."
+          if [ "${#APK_FILES[@]}" -ne 1 ]; then
 
-            printf '%s\n' "${APKs[@]}"
+            echo "ERROR: Build produced ${#APK_FILES[@]} APK files."
+
+            printf '%s\n' "${APK_FILES[@]}"
 
             exit 1
           fi
 
-          echo "UNSIGNED_APK=${APKs[0]}" >> "$GITHUB_ENV"
+          echo "UNSIGNED_APK=${APK_FILES[0]}" >> "$GITHUB_ENV"
 
-          echo "Unsigned APK: ${APKs[0]}"
+          echo "Unsigned APK:"
+          echo "${APK_FILES[0]}"
 
       - name: Zipalign and sign APK
         shell: bash
@@ -300,19 +425,20 @@ jobs:
           ZIPALIGN="$BUILD_TOOLS/zipalign"
           APKSIGNER="$BUILD_TOOLS/apksigner"
 
-          if [ ! -x "$ZIPALIGN" ] || [ ! -x "$APKSIGNER" ]; then
-
-            echo "ERROR: zipalign/apksigner not found."
-
-            ls -la "$BUILD_TOOLS" || true
-
+          if [ ! -x "$ZIPALIGN" ]; then
+            echo "ERROR: zipalign not found."
             exit 1
           fi
 
-          APK="V-${SOURCE_VERSION}-MY-SHOP.apk"
+          if [ ! -x "$APKSIGNER" ]; then
+            echo "ERROR: apksigner not found."
+            exit 1
+          fi
+
+          APK_NAME="MY_SHOP_FINAL_RELEASE.apk"
 
           ALIGNED="$GITHUB_WORKSPACE/release/aligned.apk"
-          FINAL="$GITHUB_WORKSPACE/release/$APK"
+          FINAL="$GITHUB_WORKSPACE/release/$APK_NAME"
 
           "$ZIPALIGN" -p -f 4 \
             "$PROJECT/$UNSIGNED_APK" \
@@ -328,22 +454,34 @@ jobs:
 
           rm -f "$ALIGNED"
 
-          "$APKSIGNER" verify --verbose "$FINAL"
+          "$APKSIGNER" verify \
+            --verbose \
+            "$FINAL"
 
           "$ZIPALIGN" -c -v 4 "$FINAL"
 
           sha256sum "$FINAL" > "$FINAL.sha256"
 
-          echo "APK=$APK" >> "$GITHUB_ENV"
+          echo "APK=$APK_NAME" >> "$GITHUB_ENV"
 
-          echo "SIGNED APK: $FINAL"
+          echo "========================================"
+          echo "SIGNED APK CREATED"
+          echo "$FINAL"
+          echo "========================================"
 
-      - name: Final single-APK guard
+      - name: Final release guards
         shell: bash
         run: |
           set -euo pipefail
 
-          mapfile -t FINAL_APKS < <(
+          FINAL="$GITHUB_WORKSPACE/release/$APK"
+
+          if [ ! -f "$FINAL" ]; then
+            echo "ERROR: Final APK not found."
+            exit 1
+          fi
+
+          mapfile -t APK_FILES < <(
             find "$GITHUB_WORKSPACE/release" \
               -maxdepth 1 \
               -type f \
@@ -351,33 +489,43 @@ jobs:
               -print
           )
 
-          if [ "${#FINAL_APKS[@]}" -ne 1 ]; then
+          if [ "${#APK_FILES[@]}" -ne 1 ]; then
+            echo "ERROR: Final release must contain exactly ONE APK."
 
-            echo "ERROR: Final release must contain exactly one APK."
-
-            printf '%s\n' "${FINAL_APKS[@]}"
+            printf '%s\n' "${APK_FILES[@]}"
 
             exit 1
           fi
 
-          BASENAME="$(basename "${FINAL_APKS[0]}")"
+          BASENAME="$(basename "${APK_FILES[0]}")"
 
           if [ "$BASENAME" != "$APK" ]; then
-
             echo "ERROR: APK name mismatch."
-
             echo "Expected: $APK"
-            echo "Found:    $BASENAME"
-
+            echo "Found: $BASENAME"
             exit 1
           fi
 
-          echo "FINAL APK OK: $BASENAME"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" \
+            verify \
+            --verbose \
+            "$FINAL"
 
-      - name: Upload exactly one APK
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" \
+            -c -v 4 \
+            "$FINAL"
+
+          test -s "$FINAL.sha256"
+
+          echo "========================================"
+          echo "FINAL APK VERIFIED"
+          echo "$APK"
+          echo "========================================"
+
+      - name: Upload final APK and checksum
         uses: actions/upload-artifact@v4
         with:
-          name: MY-SHOP-V-${{ env.SOURCE_VERSION }}
+          name: MY-SHOP-FINAL-V-${{ env.SOURCE_VERSION }}
 
           path: |
             release/${{ env.APK }}
