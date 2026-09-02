@@ -133,7 +133,7 @@ jobs:
         run: |
           set -e
 
-          gradle clean :app:assembleDebug --no-daemon
+          gradle clean :app:assembleRelease --no-daemon --no-build-cache --rerun-tasks
 
           mapfile -t APKs < <(
             find app/build/outputs/apk \
