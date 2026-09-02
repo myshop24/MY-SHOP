@@ -5,35 +5,45 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: MY SHOP BUILD
     runs-on: ubuntu-latest
+
+    env:
+      MYSHOP_BACKEND_URL: https://rapid-bush-62ea.myshopsatkania.workers.dev
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Find latest V ZIP
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
           best=""
           ver=-1
 
+          shopt -s nullglob
           for f in V-*.zip V_*.zip; do
-            [ -f "$f" ] || continue
-
             if [[ "$f" =~ ^V[-_]([0-9]+)-.*\.zip$ ]]; then
               n=$((10#${BASH_REMATCH[1]}))
 
-              if [ "$n" -gt "$ver" ]; then
-                ver=$n
+              if (( n > ver )); then
+                ver="$n"
                 best="$f"
               fi
             fi
           done
 
-          [ -n "$best" ] || exit 1
+          if [ -z "$best" ]; then
+            echo "ERROR: No V-numbered source ZIP found."
+            exit 1
+          fi
 
           echo "SOURCE_ZIP=$best" >> "$GITHUB_ENV"
           echo "SOURCE_VERSION=$ver" >> "$GITHUB_ENV"
@@ -41,8 +51,9 @@ jobs:
           echo "Using source: $best (V-$ver)"
 
       - name: Extract source
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           rm -rf source release
           mkdir -p source release
@@ -50,68 +61,147 @@ jobs:
           unzip -q "$SOURCE_ZIP" -d source
 
       - name: Find Android project
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          PROJECT=$(find source -type f \
-            -name settings.gradle -o -name settings.gradle.kts \
-            | head -1 \
-            | xargs -r dirname)
+          PROJECT_FILE="$(
+            find source -type f \
+              \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) \
+              -print -quit
+          )
 
-          [ -n "$PROJECT" ] || exit 1
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "ERROR: Android project not found."
+            echo "Files found in source:"
+            find source -maxdepth 5 -type f | head -200
+            exit 1
+          fi
 
+          PROJECT="$(dirname "$PROJECT_FILE")"
+
+          if [ ! -d "$PROJECT/app" ]; then
+            echo "ERROR: Android project found, but app module was not found: $PROJECT"
+            find "$PROJECT" -maxdepth 3 -type f | head -200
+            exit 1
+          fi
+
+          echo "Android project found at: $PROJECT"
           echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
 
-      - name: Fix BuildConfig
+      - name: Fix BuildConfig and backend URL
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           FILE="$PROJECT/app/build.gradle"
 
-          python3 - "$FILE" <<'PY'
+          if [ ! -f "$FILE" ]; then
+            FILE="$PROJECT/app/build.gradle.kts"
+          fi
+
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: app/build.gradle or app/build.gradle.kts not found."
+            exit 1
+          fi
+
+          python3 - "$FILE" "$MYSHOP_BACKEND_URL" <<'PY'
           import sys
           import re
 
-          p = sys.argv[1]
+          path = sys.argv[1]
+          backend = sys.argv[2]
 
-          s = open(p, encoding="utf-8").read()
+          s = open(path, encoding="utf-8").read()
 
-          field = re.compile(
-              r'^\s*buildConfigField\s+.*MYSHOP_BACKEND_URL.*$\n?',
-              re.MULTILINE
-          )
+          if path.endswith(".gradle"):
 
-          m = field.search(s)
+              if "buildFeatures" not in s or "buildConfig true" not in s:
+                  s = re.sub(
+                      r'(\bandroid\s*\{)',
+                      r'\1\n    buildFeatures { buildConfig true }',
+                      s,
+                      count=1
+                  )
 
-          if m:
-              s = s[:m.start()] + s[m.end():]
-
-          else:
-              line = """buildConfigField 'String', 'MYSHOP_BACKEND_URL', '"' + backendUrl.replace('\\\\','\\\\\\\\').replace('\\"','\\\\\\"') + '"'"""
-
-          if 'buildFeatures { buildConfig true }' not in s:
-              s = s.replace(
-                  'android {',
-                  'android {\n    buildFeatures { buildConfig true }',
-                  1
+              field = (
+                  "        buildConfigField 'String', "
+                  "'MYSHOP_BACKEND_URL', '\"%s\"'\n"
+                  % backend.replace("\\", "\\\\").replace('"', '\\"')
               )
 
-          pos = s.find('        versionName')
+              s = re.sub(
+                  r'^[ \t]*buildConfigField\s+.*MYSHOP_BACKEND_URL.*\n?',
+                  '',
+                  s,
+                  flags=re.MULTILINE
+              )
 
-          if pos < 0:
-              raise SystemExit('versionName not found')
+              m = re.search(r'(\bdefaultConfig\s*\{)', s)
 
-          end = s.find('\n', pos)
+              if not m:
+                  raise SystemExit(
+                      "defaultConfig block not found in app/build.gradle"
+                  )
 
-          s = (
-              s[:end+1]
-              + '        '
-              + line
-              + '\n'
-              + s[end+1:]
-          )
+              insert_at = m.end()
 
-          open(p, 'w', encoding='utf-8').write(s)
+              s = (
+                  s[:insert_at]
+                  + "\n"
+                  + field
+                  + s[insert_at:]
+              )
+
+          else:
+
+              if "buildFeatures" not in s or "buildConfig = true" not in s:
+                  s = re.sub(
+                      r'(\bandroid\s*\{)',
+                      r'\1\n    buildFeatures { buildConfig = true }',
+                      s,
+                      count=1
+                  )
+
+              escaped = (
+                  backend
+                  .replace("\\", "\\\\")
+                  .replace('"', '\\"')
+              )
+
+              field = (
+                  '        buildConfigField('
+                  '"String", "MYSHOP_BACKEND_URL", "\\"%s\\""'
+                  ')\n'
+                  % escaped
+              )
+
+              s = re.sub(
+                  r'^[ \t]*buildConfigField\s*\(\s*"String"\s*,\s*"MYSHOP_BACKEND_URL".*\n?',
+                  '',
+                  s,
+                  flags=re.MULTILINE
+              )
+
+              m = re.search(r'(\bdefaultConfig\s*\{)', s)
+
+              if not m:
+                  raise SystemExit(
+                      "defaultConfig block not found in app/build.gradle.kts"
+                  )
+
+              insert_at = m.end()
+
+              s = (
+                  s[:insert_at]
+                  + "\n"
+                  + field
+                  + s[insert_at:]
+              )
+
+          open(path, "w", encoding="utf-8").write(s)
+
+          print("BuildConfig/backend URL prepared:", path)
           PY
 
       - name: Setup Java
@@ -124,7 +214,10 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install Android SDK
+        shell: bash
         run: |
+          set -euo pipefail
+
           sdkmanager \
             "platform-tools" \
             "platforms;android-35" \
@@ -142,8 +235,9 @@ jobs:
           key: my-shop-release-signing-v1
 
       - name: Prepare stable MY SHOP signing key
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           mkdir -p .signing
 
@@ -168,8 +262,9 @@ jobs:
 
       - name: Build unsigned release APK
         working-directory: ${{ env.PROJECT }}
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           gradle clean :app:assembleRelease \
             --no-daemon \
@@ -178,33 +273,52 @@ jobs:
 
           mapfile -t APKs < <(
             find app/build/outputs/apk \
-            -type f \
-            -name "*.apk"
+              -type f \
+              -name "*.apk" \
+              -print
           )
 
           if [ "${#APKs[@]}" -ne 1 ]; then
-            echo "ERROR: source build produced ${#APKs[@]} APK files"
+            echo "ERROR: source build produced ${#APKs[@]} APK files."
+
             printf '%s\n' "${APKs[@]}"
+
             exit 1
           fi
 
           echo "UNSIGNED_APK=${APKs[0]}" >> "$GITHUB_ENV"
 
+          echo "Unsigned APK: ${APKs[0]}"
+
       - name: Zipalign and sign APK
-        working-directory: ${{ env.PROJECT }}
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+
+          ZIPALIGN="$BUILD_TOOLS/zipalign"
+          APKSIGNER="$BUILD_TOOLS/apksigner"
+
+          if [ ! -x "$ZIPALIGN" ] || [ ! -x "$APKSIGNER" ]; then
+
+            echo "ERROR: zipalign/apksigner not found."
+
+            ls -la "$BUILD_TOOLS" || true
+
+            exit 1
+          fi
 
           APK="V-${SOURCE_VERSION}-MY-SHOP.apk"
 
           ALIGNED="$GITHUB_WORKSPACE/release/aligned.apk"
           FINAL="$GITHUB_WORKSPACE/release/$APK"
 
-          zipalign -p -f 4 \
-            "$UNSIGNED_APK" \
+          "$ZIPALIGN" -p -f 4 \
+            "$PROJECT/$UNSIGNED_APK" \
             "$ALIGNED"
 
-          apksigner sign \
+          "$APKSIGNER" sign \
             --ks "$GITHUB_WORKSPACE/.signing/myshop-release.jks" \
             --ks-pass pass:myshop-release-2026 \
             --key-pass pass:myshop-release-2026 \
@@ -214,18 +328,61 @@ jobs:
 
           rm -f "$ALIGNED"
 
-          apksigner verify --verbose "$FINAL"
+          "$APKSIGNER" verify --verbose "$FINAL"
 
-          zipalign -c -v 4 "$FINAL"
+          "$ZIPALIGN" -c -v 4 "$FINAL"
 
           sha256sum "$FINAL" > "$FINAL.sha256"
 
           echo "APK=$APK" >> "$GITHUB_ENV"
 
+          echo "SIGNED APK: $FINAL"
+
       - name: Final single-APK guard
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           mapfile -t FINAL_APKS < <(
             find "$GITHUB_WORKSPACE/release" \
-            -maxdepth 1 \
+              -maxdepth 1 \
+              -type f \
+              -name "*.apk" \
+              -print
+          )
+
+          if [ "${#FINAL_APKS[@]}" -ne 1 ]; then
+
+            echo "ERROR: Final release must contain exactly one APK."
+
+            printf '%s\n' "${FINAL_APKS[@]}"
+
+            exit 1
+          fi
+
+          BASENAME="$(basename "${FINAL_APKS[0]}")"
+
+          if [ "$BASENAME" != "$APK" ]; then
+
+            echo "ERROR: APK name mismatch."
+
+            echo "Expected: $APK"
+            echo "Found:    $BASENAME"
+
+            exit 1
+          fi
+
+          echo "FINAL APK OK: $BASENAME"
+
+      - name: Upload exactly one APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MY-SHOP-V-${{ env.SOURCE_VERSION }}
+
+          path: |
+            release/${{ env.APK }}
+            release/${{ env.APK }}.sha256
+
+          if-no-files-found: error
+
+          retention-days: 30
