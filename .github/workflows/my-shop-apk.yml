@@ -22,8 +22,10 @@ jobs:
 
           for f in V-*.zip V_*.zip; do
             [ -f "$f" ] || continue
+
             if [[ "$f" =~ ^V[-_]([0-9]+)-.*\.zip$ ]]; then
               n=$((10#${BASH_REMATCH[1]}))
+
               if [ "$n" -gt "$ver" ]; then
                 ver=$n
                 best="$f"
@@ -36,13 +38,15 @@ jobs:
           echo "SOURCE_ZIP=$best" >> "$GITHUB_ENV"
           echo "SOURCE_VERSION=$ver" >> "$GITHUB_ENV"
 
-          echo "Using: $best"
+          echo "Using source: $best (V-$ver)"
 
       - name: Extract source
         run: |
           set -e
-          rm -rf source
-          mkdir source
+
+          rm -rf source release
+          mkdir -p source release
+
           unzip -q "$SOURCE_ZIP" -d source
 
       - name: Find Android project
@@ -50,8 +54,9 @@ jobs:
           set -e
 
           PROJECT=$(find source -type f \
-            \( -name settings.gradle -o -name settings.gradle.kts \) \
-            | head -1 | xargs -r dirname)
+            -name settings.gradle -o -name settings.gradle.kts \
+            | head -1 \
+            | xargs -r dirname)
 
           [ -n "$PROJECT" ] || exit 1
 
@@ -68,6 +73,7 @@ jobs:
           import re
 
           p = sys.argv[1]
+
           s = open(p, encoding="utf-8").read()
 
           field = re.compile(
@@ -75,38 +81,38 @@ jobs:
               re.MULTILINE
           )
 
-          match = field.search(s)
+          m = field.search(s)
 
-          if match:
-              line = match.group(0).strip()
-              s = s[:match.start()] + s[match.end():]
+          if m:
+              s = s[:m.start()] + s[m.end():]
+
           else:
               line = """buildConfigField 'String', 'MYSHOP_BACKEND_URL', '"' + backendUrl.replace('\\\\','\\\\\\\\').replace('\\"','\\\\\\"') + '"'"""
 
-          if "buildFeatures { buildConfig true }" not in s:
+          if 'buildFeatures { buildConfig true }' not in s:
               s = s.replace(
-                  "android {",
-                  "android {\n    buildFeatures { buildConfig true }",
+                  'android {',
+                  'android {\n    buildFeatures { buildConfig true }',
                   1
               )
 
-          marker = "        versionName"
-          pos = s.find(marker)
+          pos = s.find('        versionName')
 
-          if pos == -1:
-              raise SystemExit("versionName not found")
+          if pos < 0:
+              raise SystemExit('versionName not found')
 
-          end = s.find("\n", pos)
+          end = s.find('\n', pos)
 
-          s = s[:end + 1] + "        " + line + "\n" + s[end + 1:]
+          s = (
+              s[:end+1]
+              + '        '
+              + line
+              + '\n'
+              + s[end+1:]
+          )
 
-          open(p, "w", encoding="utf-8").write(s)
-
-          print("BuildConfig fixed.")
+          open(p, 'w', encoding='utf-8').write(s)
           PY
-
-          echo "----- build.gradle -----"
-          sed -n '1,30p' "$FILE"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -119,7 +125,8 @@ jobs:
 
       - name: Install Android SDK
         run: |
-          sdkmanager "platform-tools" \
+          sdkmanager \
+            "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
@@ -128,40 +135,97 @@ jobs:
         with:
           gradle-version: "8.11.1"
 
-      - name: Build APK
+      - name: Restore stable MY SHOP signing key
+        uses: actions/cache@v4
+        with:
+          path: .signing
+          key: my-shop-release-signing-v1
+
+      - name: Prepare stable MY SHOP signing key
+        run: |
+          set -e
+
+          mkdir -p .signing
+
+          if [ ! -f .signing/myshop-release.jks ]; then
+
+            keytool -genkeypair -v \
+              -keystore .signing/myshop-release.jks \
+              -storepass myshop-release-2026 \
+              -keypass myshop-release-2026 \
+              -alias myshop \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=MY SHOP, OU=App, O=MY SHOP, L=Satkania, ST=Chattogram, C=BD"
+
+          fi
+
+          keytool -list \
+            -keystore .signing/myshop-release.jks \
+            -storepass myshop-release-2026 \
+            -alias myshop >/dev/null
+
+      - name: Build unsigned release APK
         working-directory: ${{ env.PROJECT }}
         run: |
           set -e
 
-          gradle clean :app:assembleRelease --no-daemon --no-build-cache --rerun-tasks
+          gradle clean :app:assembleRelease \
+            --no-daemon \
+            --no-build-cache \
+            --rerun-tasks
 
           mapfile -t APKs < <(
             find app/build/outputs/apk \
-            -type f -name "*.apk"
+            -type f \
+            -name "*.apk"
           )
 
-          [ "${#APKs[@]}" -eq 1 ] || {
-            echo "ERROR: APK count is not 1"
+          if [ "${#APKs[@]}" -ne 1 ]; then
+            echo "ERROR: source build produced ${#APKs[@]} APK files"
+            printf '%s\n' "${APKs[@]}"
             exit 1
-          }
+          fi
 
-          mkdir -p "$GITHUB_WORKSPACE/release"
+          echo "UNSIGNED_APK=${APKs[0]}" >> "$GITHUB_ENV"
+
+      - name: Zipalign and sign APK
+        working-directory: ${{ env.PROJECT }}
+        run: |
+          set -e
 
           APK="V-${SOURCE_VERSION}-MY-SHOP.apk"
 
-          cp "${APKs[0]}" \
-            "$GITHUB_WORKSPACE/release/$APK"
+          ALIGNED="$GITHUB_WORKSPACE/release/aligned.apk"
+          FINAL="$GITHUB_WORKSPACE/release/$APK"
 
-          sha256sum \
-            "$GITHUB_WORKSPACE/release/$APK" \
-            > "$GITHUB_WORKSPACE/release/$APK.sha256"
+          zipalign -p -f 4 \
+            "$UNSIGNED_APK" \
+            "$ALIGNED"
+
+          apksigner sign \
+            --ks "$GITHUB_WORKSPACE/.signing/myshop-release.jks" \
+            --ks-pass pass:myshop-release-2026 \
+            --key-pass pass:myshop-release-2026 \
+            --ks-key-alias myshop \
+            --out "$FINAL" \
+            "$ALIGNED"
+
+          rm -f "$ALIGNED"
+
+          apksigner verify --verbose "$FINAL"
+
+          zipalign -c -v 4 "$FINAL"
+
+          sha256sum "$FINAL" > "$FINAL.sha256"
 
           echo "APK=$APK" >> "$GITHUB_ENV"
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: MY-SHOP-V-${{ env.SOURCE_VERSION }}
-          path: |
-            release/${{ env.APK }}
-            release/${{ env.APK }}.sha256
+      - name: Final single-APK guard
+        run: |
+          set -e
+
+          mapfile -t FINAL_APKS < <(
+            find "$GITHUB_WORKSPACE/release" \
+            -maxdepth 1 \
