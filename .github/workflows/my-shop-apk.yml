@@ -1,4 +1,4 @@
-name: MY SHOP V-193 PERMANENT CLOUD D1 R2 FIX RELEASE
+name: MY SHOP V-195 PERMANENT CLOUD D1 R2 FIX RELEASE
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
             fi
           done
           test -n "$BEST" || { echo 'ERROR: No V-numbered source ZIP found.'; exit 1; }
-          test "$VERSION" -ge 193 || { echo "ERROR: Refusing to build a source older than V-193."; exit 1; }
+          test "$VERSION" -ge 195 || { echo "ERROR: Refusing to build a source older than V-195."; exit 1; }
           echo "SOURCE_ZIP=$BEST" >> "$GITHUB_ENV"
           echo "SOURCE_VERSION=$VERSION" >> "$GITHUB_ENV"
           [[ "$BEST" == V-$VERSION-* ]] || { echo 'ERROR: ZIP filename/version mismatch; BUILD STOP'; exit 1; }
@@ -140,7 +140,9 @@ jobs:
           grep -Fq 'SOCIAL MEDIA' "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
           grep -Fq 'SHARE APP' "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
           grep -Fq 'CUSTOMER SUPPORT' "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
+          grep -Fq 'SHARE APP' "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
           grep -Fq 'HELP & SUPPORT' "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
+          grep -Fq 'SOCIAL MEDIA' "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
           grep -Fq 'Search' "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
           grep -Fq '🌎' "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
           ! grep -Fq 'globe.setBackground(round(RED' "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
@@ -216,7 +218,6 @@ jobs:
           fi
           grep -Fq 'new Intent(FeatureActivity.this,FeatureActivity.class)' "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
           echo 'JAVA CONTEXT-SAFETY GUARD PASSED'
-
           ! grep -Fq 'INSERT INTO banner_media(folder,slot,object_key,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(folder,slot)' "$PROJECT/backend/worker/src/index.js"
           ! grep -Fq 'INSERT INTO social_links(platform,url,icon_key,active) VALUES(?,?,?,?) ON CONFLICT(platform)' "$PROJECT/backend/worker/src/index.js"
           echo 'LEGACY-D1 WRITE COMPATIBILITY GUARD PASSED'
@@ -243,7 +244,11 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$MYSHOP_HEALTH_PROBE_KEY" | npx --yes wrangler@4.128.0 secret put MYSHOP_HEALTH_PROBE_KEY --config wrangler.toml
-          npx --yes wrangler@4.128.0 deploy --config wrangler.toml
+          WORKER_VERSION_TAG="my-shop-v-${SOURCE_VERSION}-run-${GITHUB_RUN_ID}"
+          npx --yes wrangler@4.128.0 versions upload --config wrangler.toml --tag "$WORKER_VERSION_TAG" --message "MY SHOP V-$SOURCE_VERSION run $GITHUB_RUN_ID"
+          npx --yes wrangler@4.128.0 versions deploy --config wrangler.toml --version-tag "$WORKER_VERSION_TAG" -y
+          echo "EXACT WORKER VERSION PROMOTED: $WORKER_VERSION_TAG"
+          npx --yes wrangler@4.128.0 deployments status --config wrangler.toml --json | tee /tmp/worker-deployment-status.json
 
       - name: Write immutable build source manifest
         shell: bash
@@ -257,9 +262,29 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release/cloudflare
-          curl --fail --silent --show-error --retry 10 --retry-delay 3 "$WORKER_URL/health" | tee /tmp/health.json | tee release/cloudflare/health.json
-          curl --fail --silent --show-error --retry 10 --retry-delay 3 "$WORKER_URL/health/deep" | tee /tmp/deep.json | tee release/cloudflare/deep-health.json
-          curl --fail --silent --show-error --retry 10 --retry-delay 3 "$WORKER_URL/v1/dashboard/config" | tee /tmp/dashboard.json | tee release/cloudflare/dashboard.json
+          probe() {
+            local url="$1" out="$2"
+            local i status
+            for i in $(seq 1 20); do
+              status="$(curl --silent --show-error --output "$out.tmp" --write-out '%{http_code}' "$url" || true)"
+              cp "$out.tmp" "$out"
+              if [ "$status" = "200" ]; then return 0; fi
+              sleep 3
+            done
+            echo "ERROR: Worker probe did not return HTTP 200: $url"
+            cat "$out" || true
+            return 1
+          }
+
+          probe "$WORKER_URL/health" /tmp/health.json
+          cp /tmp/health.json release/cloudflare/health.json
+
+          probe "$WORKER_URL/health/deep" /tmp/deep.json
+          cp /tmp/deep.json release/cloudflare/deep-health.json
+
+          probe "$WORKER_URL/v1/dashboard/config" /tmp/dashboard.json
+          cp /tmp/dashboard.json release/cloudflare/dashboard.json
+
           python3 - "$SOURCE_VERSION" <<'PY'
           import json,sys
           v=int(sys.argv[1])
