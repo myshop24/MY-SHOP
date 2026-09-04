@@ -1,4 +1,4 @@
-name: MY SHOP V-192 PERMANENT CLOUD D1 R2 RELEASE
+name: MY SHOP V-193 PERMANENT CLOUD D1 R2 FIX RELEASE
 
 on:
   push:
@@ -16,9 +16,7 @@ jobs:
   verify-deploy-build:
     name: VERIFY → WORKER → APK
     runs-on: ubuntu-latest
-
     steps:
-
       - name: Checkout
         uses: actions/checkout@v5
 
@@ -26,766 +24,278 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          BEST=""
-          VERSION=-1
-
+          BEST=""; VERSION=-1
           shopt -s nullglob
-
           for FILE in V-*.zip V_*.zip; do
             if [[ "$FILE" =~ ^V[-_]([0-9]+)-.*\.zip$ ]]; then
               N=$((10#${BASH_REMATCH[1]}))
-
-              if (( N > VERSION )); then
-                VERSION="$N"
-                BEST="$FILE"
-              fi
+              if (( N > VERSION )); then VERSION="$N"; BEST="$FILE"; fi
             fi
           done
-
-          test -n "$BEST" || {
-            echo "ERROR: No V-numbered source ZIP found."
-            exit 1
-          }
-
-          test "$VERSION" -ge 192 || {
-            echo "ERROR: Refusing to build source older than V-192."
-            exit 1
-          }
-
+          test -n "$BEST" || { echo 'ERROR: No V-numbered source ZIP found.'; exit 1; }
+          test "$VERSION" -ge 193 || { echo "ERROR: Refusing to build a source older than V-193."; exit 1; }
           echo "SOURCE_ZIP=$BEST" >> "$GITHUB_ENV"
           echo "SOURCE_VERSION=$VERSION" >> "$GITHUB_ENV"
-
-          [[ "$BEST" == V-$VERSION-* ]] || {
-            echo "ERROR: ZIP filename/version mismatch."
-            exit 1
-          }
-
-          echo "Selected newest source: $BEST"
-          echo "Detected version: V-$VERSION"
+          [[ "$BEST" == V-$VERSION-* ]] || { echo 'ERROR: ZIP filename/version mismatch; BUILD STOP'; exit 1; }
+          echo "Selected ONLY newest source: $BEST (V-$VERSION); older V-numbered ZIPs are ignored."
 
       - name: Extract exact source
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf source release
           mkdir -p source release
-
           unzip -q "$SOURCE_ZIP" -d source
-
-          BUILD_ID_FILE="$(
-            find source -type f -name SOURCE_BUILD_ID.txt -print -quit
-          )"
-
-          test -n "$BUILD_ID_FILE" || {
-            echo "ERROR: SOURCE_BUILD_ID.txt not found."
-            exit 1
-          }
-
-          grep -Fqx \
-            "MY SHOP V-$SOURCE_VERSION" \
-            "$BUILD_ID_FILE"
-
+          BUILD_ID_FILE="$(find source -type f -name SOURCE_BUILD_ID.txt -print -quit)"
+          test -n "$BUILD_ID_FILE" || { echo 'ERROR: SOURCE_BUILD_ID.txt not found'; exit 1; }
+          grep -Fqx "MY SHOP V-$SOURCE_VERSION" "$BUILD_ID_FILE"
           ROOT_SOURCE="$(dirname "$BUILD_ID_FILE")"
-
-          test -f "$ROOT_SOURCE/app/build.gradle" || \
-          test -f "$ROOT_SOURCE/app/build.gradle.kts" || {
-            echo "ERROR: Android Gradle project not found."
-            exit 1
-          }
-
-          test -f "$ROOT_SOURCE/backend/worker/src/index.js" || {
-            echo "ERROR: Worker source not found."
-            exit 1
-          }
-
-          APP_GRADLE="$(
-            find "$ROOT_SOURCE/app" \
-              -maxdepth 1 \
-              -type f \
-              -name 'build.gradle*' \
-              -print -quit
-          )"
-
+          test -f "$ROOT_SOURCE/app/build.gradle" || test -f "$ROOT_SOURCE/app/build.gradle.kts" || { echo 'ERROR: Source root has no app Gradle file'; exit 1; }
+          test -f "$ROOT_SOURCE/backend/worker/src/index.js" || { echo 'ERROR: Source root has no Worker source'; exit 1; }
+          APP_GRADLE="$(find "$ROOT_SOURCE/app" -maxdepth 1 -type f -name 'build.gradle*' -print -quit)"
           python3 - "$APP_GRADLE" "$SOURCE_VERSION" <<'PY'
-          import re
-          import sys
-
-          path = sys.argv[1]
-          ver = int(sys.argv[2])
-
-          s = open(path, encoding="utf-8").read()
-
-          m = re.search(r'\bversionCode\s+(\d+)', s)
-
-          assert m and int(m.group(1)) == ver, \
-              "ERROR: Source versionCode mismatch."
-
-          m = re.search(
-              r"\bversionName\s+['\"]([^'\"]+)['\"]",
-              s
-          )
-
-          assert m and m.group(1) == f"2.9.{ver}", \
-              "ERROR: Source versionName mismatch."
-
-          print("ANDROID VERSION LOCK PASSED")
+          import re,sys
+          p,ver=sys.argv[1],int(sys.argv[2]); s=open(p,encoding='utf-8').read()
+          m=re.search(r'\bversionCode\s+(\d+)',s); assert m and int(m.group(1))==ver, 'ERROR: Source versionCode mismatch; BUILD STOP'
+          m=re.search(r"\bversionName\s+['\"]([^'\"]+)['\"]",s); assert m and m.group(1)==f'2.9.{ver}', 'ERROR: Source versionName mismatch; BUILD STOP'
           PY
-
           echo "SOURCE_ROOT=$ROOT_SOURCE" >> "$GITHUB_ENV"
 
       - name: Locate Android + Worker project
         shell: bash
         run: |
           set -euo pipefail
-
-          SETTINGS="$(
-            find source \
-              -type f \
-              \( -name settings.gradle -o -name settings.gradle.kts \) \
-              -print -quit
-          )"
-
-          test -n "$SETTINGS" || {
-            echo "ERROR: Android settings file not found."
-            exit 1
-          }
-
+          SETTINGS="$(find source -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)"
+          test -n "$SETTINGS" || { echo 'ERROR: Android settings file not found.'; exit 1; }
           PROJECT="$(dirname "$SETTINGS")"
-
-          test -f "$PROJECT/app/build.gradle" || \
-          test -f "$PROJECT/app/build.gradle.kts" || {
-            echo "ERROR: app Gradle file not found."
-            exit 1
-          }
-
-          test -f "$PROJECT/backend/worker/wrangler.toml" || {
-            echo "ERROR: Worker wrangler.toml not found."
-            exit 1
-          }
-
-          test -f "$PROJECT/backend/worker/src/index.js" || {
-            echo "ERROR: Worker source not found."
-            exit 1
-          }
-
+          test -f "$PROJECT/app/build.gradle" || test -f "$PROJECT/app/build.gradle.kts" || { echo 'ERROR: app Gradle file not found.'; exit 1; }
+          test -f "$PROJECT/backend/worker/wrangler.toml" || { echo 'ERROR: Worker wrangler.toml not found.'; exit 1; }
+          test -f "$PROJECT/backend/worker/src/index.js" || { echo 'ERROR: Worker source not found.'; exit 1; }
           echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
+
+      - name: Verify workflow Python heredoc safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          WF="$PROJECT/.github/workflows/my-shop-apk.yml"
+          test -f "$WF"
+          ! grep -Fq 'python3 '"$PROJECT/app/build.gradle" "$WF"
+          ! grep -Fq 'python3 '"$PROJECT/backend/worker/src/index.js" "$WF"
+          grep -Fq 'python3 - "$PROJECT/app/build.gradle"' "$WF"
+          grep -Fq 'python3 - "$PROJECT/backend/worker/src/index.js"' "$WF"
+          echo "WORKFLOW PYTHON HEREDOC SAFETY PASSED"
 
       - name: Lock app version, backend version, URL and permanent bindings
         shell: bash
         run: |
           set -euo pipefail
-
-          python3 \
-            "$PROJECT/app/build.gradle" \
-            "$SOURCE_VERSION" \
-            "$MYSHOP_BACKEND_URL" <<'PY'
-
-          import re
-          import sys
-
-          path = sys.argv[1]
-          ver = int(sys.argv[2])
-          url = sys.argv[3]
-
-          s = open(path, encoding="utf-8").read()
-
-          s = re.sub(
-              r'\bversionCode\s+\d+',
-              f'versionCode {ver}',
-              s,
-              count=1
-          )
-
-          s = re.sub(
-              r'\bversionName\s+["\'][^"\']+["\']',
-              f"versionName '2.9.{ver}'",
-              s,
-              count=1
-          )
-
-          s = re.sub(
-              r'^[ \t]*buildConfigField\s+.*MYSHOP_BACKEND_URL.*\n?',
-              '',
-              s,
-              flags=re.M
-          )
-
-          m = re.search(
-              r'\bdefaultConfig\s*\{',
-              s
-          )
-
-          assert m, "defaultConfig not found"
-
-          field = (
-              "        buildConfigField 'String', "
-              "'MYSHOP_BACKEND_URL', "
-              f"'\"{url}\"'\n"
-          )
-
-          s = s[:m.end()] + "\n" + field + s[m.end():]
-
-          open(path, "w", encoding="utf-8").write(s)
-
+          python3 - "$PROJECT/app/build.gradle" "$SOURCE_VERSION" "$MYSHOP_BACKEND_URL" <<'PY'
+          import re,sys
+          path,ver,url=sys.argv[1],int(sys.argv[2]),sys.argv[3]
+          s=open(path,encoding='utf-8').read()
+          s=re.sub(r'\bversionCode\s+\d+',f'versionCode {ver}',s,count=1)
+          s=re.sub(r'\bversionName\s+["\'][^"\']+["\']',f"versionName '2.9.{ver}'",s,count=1)
+          s=re.sub(r'^[ \t]*buildConfigField\s+.*MYSHOP_BACKEND_URL.*\n?','',s,flags=re.M)
+          m=re.search(r'\bdefaultConfig\s*\{',s); assert m,'defaultConfig not found'
+          field=f"        buildConfigField 'String', 'MYSHOP_BACKEND_URL', '\"{url}\"'\n"
+          s=s[:m.end()]+'\n'+field+s[m.end():]
+          open(path,'w',encoding='utf-8').write(s)
           PY
 
-          python3 \
-            "$PROJECT/backend/worker/src/index.js" \
-            "$SOURCE_VERSION" <<'PY'
-
-          import re
-          import sys
-
-          path = sys.argv[1]
-          ver = int(sys.argv[2])
-
-          s = open(path, encoding="utf-8").read()
-
-          s, n = re.subn(
-              r"version:'2\.9\.\d+',build:'V-\d+'",
-              f"version:'2.9.{ver}',build:'V-{ver}'",
-              s,
-              count=1
-          )
-
-          assert n == 1, \
-              "Worker version marker not found."
-
-          open(path, "w", encoding="utf-8").write(s)
-
+          python3 - "$PROJECT/backend/worker/src/index.js" "$SOURCE_VERSION" <<'PY'
+          import re,sys
+          path,ver=sys.argv[1],int(sys.argv[2])
+          s=open(path,encoding='utf-8').read()
+          s,n=re.subn(r"version:'2\.9\.\d+',build:'V-\d+'",f"version:'2.9.{ver}',build:'V-{ver}'",s,count=1)
+          assert n==1,'Worker /health version marker not found'
+          open(path,'w',encoding='utf-8').write(s)
           PY
 
           TOML="$PROJECT/backend/worker/wrangler.toml"
+          grep -Fq 'name = "rapid-bush-62ea"' "$TOML"
+          grep -Fq 'database_name = "my-shop-db"' "$TOML"
+          grep -Fq 'database_id = "15b6acd2-0e82-4bd8-95fb-bee6fc08936c"' "$TOML"
+          grep -Fq 'binding = "MEDIA"' "$TOML"
+          grep -Fq 'bucket_name = "my-shop-media"' "$TOML"
+          grep -Fq '"/v1/feed"' "$PROJECT/backend/worker/src/index.js" || grep -Fq "'/v1/feed'" "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'avatar_object_key' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'PROFILE_UPDATE_FAILED' "$PROJECT/backend/worker/src/index.js"
+          node --check "$PROJECT/backend/worker/src/index.js"
 
-          grep -Fq \
-            'name = "rapid-bush-62ea"' \
-            "$TOML"
+          BUILD_ID_FILE="$(find "$PROJECT" -type f -name SOURCE_BUILD_ID.txt -print -quit)"
+          test -n "$BUILD_ID_FILE" || { echo 'ERROR: SOURCE_BUILD_ID.txt not found after source extraction'; exit 1; }
+          grep -Fqx "MY SHOP V-$SOURCE_VERSION" "$BUILD_ID_FILE"
 
-          grep -Fq \
-            'database_name = "my-shop-db"' \
-            "$TOML"
-
-          grep -Fq \
-            'database_id = "15b6acd2-0e82-4bd8-95fb-bee6fc08936c"' \
-            "$TOML"
-
-          grep -Fq \
-            'binding = "MEDIA"' \
-            "$TOML"
-
-          grep -Fq \
-            'bucket_name = "my-shop-media"' \
-            "$TOML"
-
-          node --check \
-            "$PROJECT/backend/worker/src/index.js"
-
-          BUILD_ID_FILE="$(
-            find "$PROJECT" \
-              -type f \
-              -name SOURCE_BUILD_ID.txt \
-              -print -quit
-          )"
-
-          test -n "$BUILD_ID_FILE"
-
-          grep -Fqx \
-            "MY SHOP V-$SOURCE_VERSION" \
-            "$BUILD_ID_FILE"
-
-          echo "SOURCE BUILD LOCK PASSED"
-          echo "ZIP=$SOURCE_ZIP"
-          echo "VERSION=V-$SOURCE_VERSION"
-          echo "ANDROID=2.9.$SOURCE_VERSION"
-          echo "WORKER=V-$SOURCE_VERSION"
+          echo "SOURCE_VERSION=$SOURCE_VERSION locked"
+          echo "SOURCE BUILD LOCK PASSED: ZIP=$SOURCE_ZIP | SOURCE_BUILD_ID=V-$SOURCE_VERSION | Android=2.9.$SOURCE_VERSION | Worker=V-$SOURCE_VERSION"
 
       - name: Verify MY SHOP instruction safety before deploy
         shell: bash
         run: |
           set -euo pipefail
+          ! grep -Fq 'AdminSectionActivity' "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
+          grep -Fq 'getBooleanExtra("admin_context",false)' "$PROJECT/app/src/main/java/com/myshop/app/AdminSectionActivity.java"
+          grep -Fq 'putExtra("admin_context",true)' "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
+          grep -Fq 'putExtra("admin_context",true)' "$PROJECT/app/src/main/java/com/myshop/app/AdminHubActivity.java"
+          grep -Fq 'SOCIAL MEDIA' "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
+          grep -Fq 'SHARE APP' "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
+          grep -Fq 'CUSTOMER SUPPORT' "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
+          grep -Fq 'HELP & SUPPORT' "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
+          grep -Fq 'Search' "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
+          grep -Fq '🌎' "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
+          ! grep -Fq 'globe.setBackground(round(RED' "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
+          grep -Fq 'openSupport' "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
+          grep -Fq 'threeLineMenu' "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
+          grep -Fq 'SAVE / EDIT' "$PROJECT/app/src/main/java/com/myshop/app/AdminSectionActivity.java"
+          grep -Fq 'extTitle' "$PROJECT/app/src/main/java/com/myshop/app/AdminSectionActivity.java"
+          grep -Fq 'normalizePlatformTarget' "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
+          grep -Fq 'menu_language' "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
+          grep -Fq 'R.drawable.nav_home' "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
+          grep -Fq 'R.drawable.nav_store' "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
+          grep -Fq 'R.drawable.nav_live' "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
+          grep -Fq 'R.drawable.nav_support' "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
+          grep -Fq 'R.drawable.nav_more' "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
+          grep -Fq 'ACTION_GET_CONTENT' "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
+          grep -Fq 'ensureSchemasOnce(env)' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'normalizeWhatsApp' "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
+          grep -Fq 'renderMore' "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
+          grep -Fq 'R2_VERIFY_FAILED' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'adminBannerUpload' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'notificationsList' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'notificationsReadAll' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'ensureNotificationSchema' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'createUserNotification' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'NOTIFICATION_DB_WRITE_FAILED' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'assertContentSchema' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'D1_SCHEMA_REPAIR_FAILED' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'myshop_schema_meta' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'V-192 permanent legacy-banner repair' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'd1WriteProbe' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'r2WriteProbe' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'contentWriteSuite' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'D1_WRITE_READY_FAILED' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'onResume' "$PROJECT/app/src/main/java/com/myshop/app/NotificationActivity.java"
+          grep -Fq 'Facebook' "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
+          grep -Fq 'YouTube' "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
+          grep -Fq 'Instagram' "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
+          grep -Fq 'Telegram' "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
+          grep -Fq 'Customer Support' "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
+          grep -Fq 'Share MY SHOP' "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
+          grep -Fq 'commentCount' "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
+          grep -Fq 'comment_count' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'INSERT INTO notification_reads' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'SELECT id FROM banner_media WHERE folder=? AND slot=?' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'section' "$PROJECT/backend/worker/src/index.js"
+          grep -Fq 'position' "$PROJECT/backend/worker/src/index.js"
+          ! grep -RniE 'DROP[[:space:]]+TABLE|TRUNCATE[[:space:]]+TABLE|DELETE[[:space:]]+FROM[[:space:]]+myshop_auth_users_v108' "$PROJECT/backend/worker/src" >/dev/null
+          echo 'INSTRUCTION + DATA SAFETY GUARDS PASSED'
 
-          ! grep -Fq \
-            'AdminSectionActivity' \
-            "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
-
-          grep -Fq \
-            'getBooleanExtra("admin_context",false)' \
-            "$PROJECT/app/src/main/java/com/myshop/app/AdminSectionActivity.java"
-
-          grep -Fq \
-            'putExtra("admin_context",true)' \
-            "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
-
-          grep -Fq \
-            'putExtra("admin_context",true)' \
-            "$PROJECT/app/src/main/java/com/myshop/app/AdminHubActivity.java"
-
-          grep -Fq 'SOCIAL MEDIA' \
-            "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
-
-          grep -Fq 'SHARE APP' \
-            "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
-
-          grep -Fq 'CUSTOMER SUPPORT' \
-            "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
-
-          grep -Fq 'HELP & SUPPORT' \
-            "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
-
-          grep -Fq 'Search' \
-            "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
-
-          grep -Fq '🌎' \
-            "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
-
-          ! grep -Fq \
-            'globe.setBackground(round(RED' \
-            "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
-
-          grep -Fq 'openSupport' \
-            "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
-
-          grep -Fq 'threeLineMenu' \
-            "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
-
-          grep -Fq 'SAVE / EDIT' \
-            "$PROJECT/app/src/main/java/com/myshop/app/AdminSectionActivity.java"
-
-          grep -Fq 'extTitle' \
-            "$PROJECT/app/src/main/java/com/myshop/app/AdminSectionActivity.java"
-
-          grep -Fq 'normalizePlatformTarget' \
-            "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
-
-          grep -Fq 'menu_language' \
-            "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java"
-
-          grep -Fq 'R.drawable.nav_home' \
-            "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
-
-          grep -Fq 'R.drawable.nav_store' \
-            "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
-
-          grep -Fq 'R.drawable.nav_live' \
-            "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
-
-          grep -Fq 'R.drawable.nav_support' \
-            "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
-
-          grep -Fq 'R.drawable.nav_more' \
-            "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
-
-          grep -Fq 'ACTION_GET_CONTENT' \
-            "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
-
-          grep -Fq 'ensureSchemasOnce(env)' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'normalizeWhatsApp' \
-            "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
-
-          grep -Fq 'renderMore' \
-            "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
-
-          grep -Fq 'R2_VERIFY_FAILED' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'adminBannerUpload' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'notificationsList' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'notificationsReadAll' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'ensureNotificationSchema' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'createUserNotification' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'NOTIFICATION_DB_WRITE_FAILED' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'assertContentSchema' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'D1_SCHEMA_REPAIR_FAILED' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'myshop_schema_meta' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'd1WriteProbe' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'r2WriteProbe' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'contentWriteSuite' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'D1_WRITE_READY_FAILED' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'onResume' \
-            "$PROJECT/app/src/main/java/com/myshop/app/NotificationActivity.java"
-
-          grep -Fq 'Facebook' \
-            "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
-
-          grep -Fq 'YouTube' \
-            "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
-
-          grep -Fq 'Instagram' \
-            "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
-
-          grep -Fq 'Telegram' \
-            "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
-
-          grep -Fq 'Customer Support' \
-            "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
-
-          grep -Fq 'Share MY SHOP' \
-            "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
-
-          grep -Fq 'commentCount' \
-            "$PROJECT/app/src/main/java/com/myshop/app/MainActivity.java"
-
-          grep -Fq 'comment_count' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq \
-            'INSERT INTO notification_reads' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq \
-            'SELECT id FROM banner_media WHERE folder=? AND slot=?' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'section' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'position' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          ! grep -RniE \
-            'DROP[[:space:]]+TABLE|TRUNCATE[[:space:]]+TABLE|DELETE[[:space:]]+FROM[[:space:]]+myshop_auth_users_v108' \
-            "$PROJECT/backend/worker/src" >/dev/null
-
-          echo "INSTRUCTION + DATA SAFETY GUARDS PASSED"
-
-      - name: Verify release workflow has permanent Cloudflare gate
+      - name: Verify release workflow has mandatory Cloudflare gate
         shell: bash
         run: |
           set -euo pipefail
-
           WF="$PROJECT/.github/workflows/my-shop-apk.yml"
-
-          test -f "$WF" || {
-            echo "ERROR: Source ZIP is missing workflow."
-            exit 1
-          }
-
-          grep -Fq \
-            'Verify ACTIVE production Worker before APK build' \
-            "$WF"
-
-          grep -Fq \
-            'Verify ACTIVE Worker content write suite before APK build' \
-            "$WF"
-
-          grep -Fq \
-            'LIVE CONTENT WRITE SUITE PASSED' \
-            "$WF"
-
-          grep -Fq \
-            'D1/R2 READ+WRITE deep health failed' \
-            "$WF"
-
-          echo "PERMANENT CLOUDFLARE RELEASE GATE PRESENT"
+          test -f "$WF" || { echo 'ERROR: Source ZIP is missing its release workflow; BUILD STOP'; exit 1; }
+          grep -Fq 'Verify ACTIVE production Worker before APK build' "$WF"
+          grep -Fq 'Verify ACTIVE Worker content write suite before APK build' "$WF"
+          grep -Fq 'LIVE CONTENT WRITE SUITE PASSED' "$WF"
+          grep -Fq 'D1/R2 READ+WRITE deep health failed' "$WF"
+          echo 'PERMANENT CLOUDFLARE RELEASE GATE PRESENT IN SOURCE'
 
       - name: Preflight Java context-safety guard
         shell: bash
         run: |
           set -euo pipefail
+          if grep -RFn --include='*.java' 'new Intent(this,FeatureActivity.class)' "$PROJECT/app/src/main/java"; then
+            echo 'ERROR: Unsafe FeatureActivity Intent context found. Use FeatureActivity.this.'
+            exit 1
+          fi
+          if grep -RFn --include='*.java' 'new Intent(this, FeatureActivity.class)' "$PROJECT/app/src/main/java"; then
+            echo 'ERROR: Unsafe FeatureActivity Intent context found. Use FeatureActivity.this.'
+            exit 1
+          fi
+          grep -Fq 'new Intent(FeatureActivity.this,FeatureActivity.class)' "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
+          echo 'JAVA CONTEXT-SAFETY GUARD PASSED'
 
-          python3 \
-            "$PROJECT/app/src/main/java" <<'PY'
-
-          import pathlib
-          import re
-          import sys
-
-          root = pathlib.Path(sys.argv[1])
-
-          bad = []
-
-          for p in root.rglob("*.java"):
-
-              s = p.read_text(
-                  encoding="utf-8",
-                  errors="ignore"
-              )
-
-              if (
-                  "new Intent(this,FeatureActivity.class)"
-                  not in s
-                  and
-                  "new Intent(this, FeatureActivity.class)"
-                  not in s
-              ):
-                  continue
-
-              if not re.search(
-                  r'class\s+\w+\s+extends\s+'
-                  r'(?:[\w.]+\.)?'
-                  r'(?:AppCompatActivity|Activity)\b',
-                  s
-              ):
-                  bad.append(str(p))
-
-          if bad:
-
-              print(
-                  "ERROR: FeatureActivity Intent uses `this` "
-                  "from a non-Activity class:"
-              )
-
-              for x in bad:
-                  print("  " + x)
-
-              raise SystemExit(1)
-
-          print(
-              "JAVA CONTEXT-SAFETY GUARD PASSED: "
-              "Activity context usage is valid."
-          )
-
-          PY
+          ! grep -Fq 'INSERT INTO banner_media(folder,slot,object_key,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(folder,slot)' "$PROJECT/backend/worker/src/index.js"
+          ! grep -Fq 'INSERT INTO social_links(platform,url,icon_key,active) VALUES(?,?,?,?) ON CONFLICT(platform)' "$PROJECT/backend/worker/src/index.js"
+          echo 'LEGACY-D1 WRITE COMPATIBILITY GUARD PASSED'
 
       - name: Require Cloudflare deployment credentials
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           MYSHOP_HEALTH_PROBE_KEY: ${{ secrets.MYSHOP_HEALTH_PROBE_KEY }}
-
         shell: bash
         run: |
           set -euo pipefail
-
-          test -n "${CLOUDFLARE_API_TOKEN:-}" || {
-            echo "ERROR: Missing CLOUDFLARE_API_TOKEN"
-            exit 1
-          }
-
-          test -n "${CLOUDFLARE_ACCOUNT_ID:-}" || {
-            echo "ERROR: Missing CLOUDFLARE_ACCOUNT_ID"
-            exit 1
-          }
-
-          test -n "${MYSHOP_HEALTH_PROBE_KEY:-}" || {
-            echo "ERROR: Missing MYSHOP_HEALTH_PROBE_KEY"
-            exit 1
-          }
+          test -n "${CLOUDFLARE_API_TOKEN:-}" || { echo 'ERROR: Missing CLOUDFLARE_API_TOKEN'; exit 1; }
+          test -n "${CLOUDFLARE_ACCOUNT_ID:-}" || { echo 'ERROR: Missing CLOUDFLARE_ACCOUNT_ID'; exit 1; }
+          test -n "${MYSHOP_HEALTH_PROBE_KEY:-}" || { echo 'ERROR: Missing MYSHOP_HEALTH_PROBE_KEY; BUILD STOP'; exit 1; }
 
       - name: Deploy the SAME verified Worker source
         working-directory: ${{ env.PROJECT }}/backend/worker
-
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           MYSHOP_HEALTH_PROBE_KEY: ${{ secrets.MYSHOP_HEALTH_PROBE_KEY }}
-
         shell: bash
         run: |
           set -euo pipefail
-
-          printf '%s' "$MYSHOP_HEALTH_PROBE_KEY" |
-            npx --yes wrangler@4.128.0 \
-            secret put MYSHOP_HEALTH_PROBE_KEY \
-            --config wrangler.toml
-
-          npx --yes wrangler@4.128.0 \
-            deploy \
-            --config wrangler.toml
+          printf '%s' "$MYSHOP_HEALTH_PROBE_KEY" | npx --yes wrangler@4.128.0 secret put MYSHOP_HEALTH_PROBE_KEY --config wrangler.toml
+          npx --yes wrangler@4.128.0 deploy --config wrangler.toml
 
       - name: Write immutable build source manifest
         shell: bash
         run: |
           set -euo pipefail
-
-          sha256sum "$SOURCE_ZIP" \
-            > release/source-zip.sha256
-
-          printf \
-            'V-%s\n%s\n%s\n' \
-            "$SOURCE_VERSION" \
-            "$SOURCE_ZIP" \
-            "$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')" \
-            > release/BUILD_SOURCE_ID.txt
+          sha256sum "$SOURCE_ZIP" > release/source-zip.sha256
+          printf 'V-%s\n%s\n%s\n' "$SOURCE_VERSION" "$SOURCE_ZIP" "$(cat "$SOURCE_ZIP" | sha256sum | awk '{print $1}')" > release/BUILD_SOURCE_ID.txt
 
       - name: Verify ACTIVE production Worker before APK build
         shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p release/cloudflare
-
-          curl \
-            --fail \
-            --silent \
-            --show-error \
-            --retry 10 \
-            --retry-delay 3 \
-            "$WORKER_URL/health" |
-            tee /tmp/health.json |
-            tee release/cloudflare/health.json
-
-          curl \
-            --fail \
-            --silent \
-            --show-error \
-            --retry 10 \
-            --retry-delay 3 \
-            "$WORKER_URL/health/deep" |
-            tee /tmp/deep.json |
-            tee release/cloudflare/deep-health.json
-
-          curl \
-            --fail \
-            --silent \
-            --show-error \
-            --retry 10 \
-            --retry-delay 3 \
-            "$WORKER_URL/v1/dashboard/config" |
-            tee /tmp/dashboard.json |
-            tee release/cloudflare/dashboard.json
-
-          python3 \
-            "$SOURCE_VERSION" <<'PY'
-
-          import json
-          import sys
-
-          v = int(sys.argv[1])
-
-          h = json.load(
-              open("/tmp/health.json")
-          )
-
-          d = json.load(
-              open("/tmp/deep.json")
-          )
-
-          c = json.load(
-              open("/tmp/dashboard.json")
-          )
-
-          assert h.get("ok") is True, \
-              "Worker /health failed"
-
-          assert (
-              h.get("version") == f"2.9.{v}"
-              and
-              h.get("build") == f"V-{v}"
-          ), f"WRONG ACTIVE WORKER: {h}"
-
-          assert (
-              d.get("ok") is True
-              and d.get("database") == "ok"
-              and d.get("d1Write") == "ok"
-              and d.get("schema") == "ok"
-              and d.get("r2") == "ok"
-              and d.get("r2Write") == "ok"
-          ), f"D1/R2 READ+WRITE deep health failed: {d}"
-
-          assert not c.get("error"), \
-              f"Dashboard config failed: {c}"
-
-          print(
-              "ACTIVE WORKER VERIFIED:",
-              f"V-{v}"
-          )
-
+          curl --fail --silent --show-error --retry 10 --retry-delay 3 "$WORKER_URL/health" | tee /tmp/health.json | tee release/cloudflare/health.json
+          curl --fail --silent --show-error --retry 10 --retry-delay 3 "$WORKER_URL/health/deep" | tee /tmp/deep.json | tee release/cloudflare/deep-health.json
+          curl --fail --silent --show-error --retry 10 --retry-delay 3 "$WORKER_URL/v1/dashboard/config" | tee /tmp/dashboard.json | tee release/cloudflare/dashboard.json
+          python3 - "$SOURCE_VERSION" <<'PY'
+          import json,sys
+          v=int(sys.argv[1])
+          h=json.load(open('/tmp/health.json'))
+          d=json.load(open('/tmp/deep.json'))
+          c=json.load(open('/tmp/dashboard.json'))
+          assert h.get('ok') is True, 'Worker /health failed'
+          assert h.get('version')==f'2.9.{v}' and h.get('build')==f'V-{v}', f'WRONG ACTIVE WORKER: {h}'
+          assert d.get('ok') is True and d.get('database')=='ok' and d.get('d1Write')=='ok' and d.get('schema')=='ok' and d.get('r2')=='ok' and d.get('r2Write')=='ok', f'D1/R2 READ+WRITE deep health failed: {d}'
+          assert not c.get('error'), f'Dashboard config failed: {c}'
+          print('ACTIVE WORKER VERIFIED:',f'V-{v}')
           PY
 
       - name: Verify ACTIVE Worker content write suite before APK build
         env:
           MYSHOP_HEALTH_PROBE_KEY: ${{ secrets.MYSHOP_HEALTH_PROBE_KEY }}
-
         shell: bash
         run: |
           set -euo pipefail
-
-          test -n "${MYSHOP_HEALTH_PROBE_KEY:-}" || {
-            echo "ERROR: Missing MYSHOP_HEALTH_PROBE_KEY."
-            echo "BUILD STOPPED because live content-write verification is mandatory."
-            exit 1
-          }
-
-          curl \
-            --fail \
-            --silent \
-            --show-error \
-            --retry 5 \
-            --retry-delay 2 \
-            -H "X-MYSHOP-HEALTH-KEY: $MYSHOP_HEALTH_PROBE_KEY" \
-            "$WORKER_URL/health/content-write-suite" |
-            tee /tmp/content-suite.json |
-            tee release/cloudflare/content-write-suite.json
-
-          python3 <<'PY'
-
+          test -n "${MYSHOP_HEALTH_PROBE_KEY:-}" || { echo 'ERROR: Missing MYSHOP_HEALTH_PROBE_KEY; BUILD STOPPED because live content-write verification is mandatory.'; exit 1; }
+          curl --fail --silent --show-error --retry 5 --retry-delay 2 -H "X-MYSHOP-HEALTH-KEY: $MYSHOP_HEALTH_PROBE_KEY" "$WORKER_URL/health/content-write-suite" | tee /tmp/content-suite.json | tee release/cloudflare/content-write-suite.json
+          python3 - <<'PY'
           import json
-
-          d = json.load(
-              open("/tmp/content-suite.json")
-          )
-
-          assert d.get("ok") is True, \
-              f"LIVE CONTENT WRITE SUITE FAILED: {d}"
-
-          required = [
-              "schema",
-              "dashboard_config",
-              "banners",
-              "banner_media",
-              "gallery_items",
-              "gallery_media",
-              "social_links",
-              "feature_buttons",
-              "managed_links",
-              "dashboard_ads",
-              "notifications",
-              "notification_reads",
-              "r2"
-          ]
-
-          bad = [
-              k
-              for k in required
-              if d.get("checks", {}).get(k) != "ok"
-          ]
-
-          assert not bad, \
-              f"LIVE CONTENT WRITE SUITE FAILED: {bad} {d}"
-
-          print(
-              "LIVE CONTENT WRITE SUITE PASSED"
-          )
-
+          d=json.load(open('/tmp/content-suite.json'))
+          assert d.get('ok') is True, f'LIVE CONTENT WRITE SUITE FAILED: {d}'
+          required=['schema','dashboard_config','banners','banner_media','gallery_items','gallery_media','social_links','feature_buttons','managed_links','dashboard_ads','notifications','notification_reads','r2']
+          bad=[k for k in required if d.get('checks',{}).get(k)!='ok']
+          assert not bad, f'LIVE CONTENT WRITE SUITE FAILED: {bad} {d}'
+          print('LIVE CONTENT WRITE SUITE PASSED')
           PY
 
       - name: Setup Java 17
         uses: actions/setup-java@v5
-
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
 
       - name: Setup Android SDK 36
         uses: android-actions/setup-android@v3
@@ -794,24 +304,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          yes | sdkmanager --licenses \
-            >/dev/null 2>&1 || true
-
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0"
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
 
       - name: Setup Gradle 8.11.1
         uses: gradle/actions/setup-gradle@v5
-
         with:
-          gradle-version: "8.11.1"
+          gradle-version: '8.11.1'
 
       - name: Restore EXISTING permanent signing key
         uses: actions/cache@v4
-
         with:
           path: .signing
           key: my-shop-release-signing-v1
@@ -820,212 +322,78 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          test -f \
-            .signing/myshop-release.jks || {
-              echo "ERROR: Permanent signing key unavailable."
-              echo "STOPPED to prevent incompatible APK update."
-              exit 1
-          }
-
-          keytool \
-            -list \
-            -keystore .signing/myshop-release.jks \
-            -storepass "myshop-release-2026" \
-            -alias myshop \
-            >/dev/null
+          test -f .signing/myshop-release.jks || { echo 'ERROR: Permanent signing key is unavailable. STOPPED to prevent an incompatible APK update.'; exit 1; }
+          keytool -list -keystore .signing/myshop-release.jks -storepass 'myshop-release-2026' -alias myshop >/dev/null
 
       - name: Build exactly ONE release APK
         working-directory: ${{ env.PROJECT }}
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf app/build
-
-          gradle \
-            clean \
-            :app:assembleRelease \
-            --no-daemon \
-            --no-build-cache \
-            --rerun-tasks
-
-          mapfile -t APKS < <(
-            find \
-              app/build/outputs/apk/release \
-              -type f \
-              -name "*.apk" \
-              -print
-          )
-
-          test "${#APKS[@]}" -eq 1 || {
-            echo "ERROR: Expected exactly one APK."
-            echo "Found: ${#APKS[@]}"
-            printf '%s\n' "${APKS[@]}"
-            exit 1
-          }
-
-          echo "UNSIGNED_APK=${APKS[0]}" \
-            >> "$GITHUB_ENV"
+          gradle clean :app:assembleRelease --no-daemon --no-build-cache --rerun-tasks
+          mapfile -t APKS < <(find app/build/outputs/apk/release -type f -name '*.apk' -print)
+          test "${#APKS[@]}" -eq 1 || { echo "ERROR: Expected exactly one APK; found ${#APKS[@]}"; printf '%s\n' "${APKS[@]}"; exit 1; }
+          echo "UNSIGNED_APK=${APKS[0]}" >> "$GITHUB_ENV"
 
       - name: Verify package and exact version before signing
         shell: bash
         run: |
           set -euo pipefail
-
-          OUT="$(
-            "$ANDROID_HOME/build-tools/36.0.0/aapt2" \
-            dump badging \
-            "$PROJECT/$UNSIGNED_APK"
-          )"
-
+          OUT="$($ANDROID_HOME/build-tools/36.0.0/aapt2 dump badging "$PROJECT/$UNSIGNED_APK")"
           echo "$OUT"
-
-          echo "$OUT" |
-            grep -Fq \
-            "package: name='com.myshop.app'"
-
-          echo "$OUT" |
-            grep -Fq \
-            "versionName='2.9.$SOURCE_VERSION'"
-
-          echo "$OUT" |
-            grep -Fq \
-            "versionCode='$SOURCE_VERSION'"
+          echo "$OUT" | grep -Fq "package: name='com.myshop.app'"
+          echo "$OUT" | grep -Fq "versionName='2.9.$SOURCE_VERSION'"
+          echo "$OUT" | grep -Fq "versionCode='$SOURCE_VERSION'"
 
       - name: Sign exactly ONE APK with existing permanent key
         shell: bash
         run: |
           set -euo pipefail
-
           BT="$ANDROID_HOME/build-tools/36.0.0"
-
           mkdir -p release
-
-          "$BT/zipalign" \
-            -f \
-            -p 4 \
-            "$PROJECT/$UNSIGNED_APK" \
-            release/aligned.apk
-
-          "$BT/apksigner" sign \
-            --ks .signing/myshop-release.jks \
-            --ks-pass pass:myshop-release-2026 \
-            --key-pass pass:myshop-release-2026 \
-            --ks-key-alias myshop \
-            --v1-signing-enabled true \
-            --v2-signing-enabled true \
-            --v3-signing-enabled true \
-            --out release/MY_SHOP_FINAL_RELEASE.apk \
-            release/aligned.apk
-
-          "$BT/apksigner" verify \
-            --verbose \
-            release/MY_SHOP_FINAL_RELEASE.apk
-
+          "$BT/zipalign" -f -p 4 "$PROJECT/$UNSIGNED_APK" release/aligned.apk
+          "$BT/apksigner" sign --ks .signing/myshop-release.jks --ks-pass pass:myshop-release-2026 --key-pass pass:myshop-release-2026 --ks-key-alias myshop --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out release/MY_SHOP_FINAL_RELEASE.apk release/aligned.apk
+          "$BT/apksigner" verify --verbose release/MY_SHOP_FINAL_RELEASE.apk
           rm -f release/aligned.apk
-
-          sha256sum \
-            release/MY_SHOP_FINAL_RELEASE.apk \
-            > release/MY_SHOP_FINAL_RELEASE.apk.sha256
+          sha256sum release/MY_SHOP_FINAL_RELEASE.apk > release/MY_SHOP_FINAL_RELEASE.apk.sha256
 
       - name: Final safety guards
         shell: bash
         run: |
           set -euo pipefail
-
-          test "$(
-            find release \
-              -maxdepth 1 \
-              -type f \
-              -name "*.apk" |
-            wc -l |
-            tr -d " "
-          )" -eq 1
-
-          test -f \
-            release/MY_SHOP_FINAL_RELEASE.apk.sha256
-
-          ! grep -RniE \
-            'DROP[[:space:]]+TABLE|TRUNCATE|DELETE[[:space:]]+FROM[[:space:]]+myshop_auth_users_v108' \
-            "$PROJECT/backend/worker/src" \
-            >/dev/null
-
-          echo "FINAL SAFETY GUARDS PASSED"
+          test "$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')" -eq 1
+          test -f release/MY_SHOP_FINAL_RELEASE.apk.sha256
+          ! grep -RniE 'DROP[[:space:]]+TABLE|TRUNCATE|DELETE[[:space:]]+FROM[[:space:]]+myshop_auth_users_v108' "$PROJECT/backend/worker/src" >/dev/null
+          echo 'FINAL SAFETY GUARDS PASSED'
 
       - name: Require Google Drive backup credentials
         env:
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-
         shell: bash
         run: |
           set -euo pipefail
-
-          test -n "${GDRIVE_SERVICE_ACCOUNT_JSON:-}" || {
-            echo "ERROR: Missing GDRIVE_SERVICE_ACCOUNT_JSON."
-            echo "BUILD RELEASE STOPPED because backup is mandatory."
-            exit 1
-          }
-
-          test -n "${GDRIVE_FOLDER_ID:-}" || {
-            echo "ERROR: Missing GDRIVE_FOLDER_ID."
-            echo "BUILD RELEASE STOPPED because backup is mandatory."
-            exit 1
-          }
+          test -n "${GDRIVE_SERVICE_ACCOUNT_JSON:-}" || { echo 'ERROR: Missing GDRIVE_SERVICE_ACCOUNT_JSON; BUILD RELEASE STOPPED because backup is mandatory.'; exit 1; }
+          test -n "${GDRIVE_FOLDER_ID:-}" || { echo 'ERROR: Missing GDRIVE_FOLDER_ID; BUILD RELEASE STOPPED because backup is mandatory.'; exit 1; }
 
       - name: Backup Source ZIP + APK + checksums to Google Drive
         env:
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-
         shell: bash
         run: |
           set -euo pipefail
-
-          mkdir -p \
-            /tmp/gdrive \
-            /tmp/backup
-
-          printf '%s' \
-            "$GDRIVE_SERVICE_ACCOUNT_JSON" \
-            > /tmp/gdrive/service-account.json
-
-          curl -fsSL \
-            https://downloads.rclone.org/rclone-current-linux-amd64.zip \
-            -o /tmp/rclone.zip
-
-          unzip -q \
-            /tmp/rclone.zip \
-            -d /tmp/rclone
-
-          RCLONE_BIN="$(
-            find /tmp/rclone \
-              -type f \
-              -name rclone \
-              -print -quit
-          )"
-
+          mkdir -p /tmp/gdrive /tmp/backup
+          printf '%s' "$GDRIVE_SERVICE_ACCOUNT_JSON" > /tmp/gdrive/service-account.json
+          curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
+          unzip -q /tmp/rclone.zip -d /tmp/rclone
+          RCLONE_BIN="$(find /tmp/rclone -type f -name rclone -print -quit)"
           test -x "$RCLONE_BIN"
-
-          mkdir -p \
-            "/tmp/backup/V-${SOURCE_VERSION}"
-
-          cp \
-            "$SOURCE_ZIP" \
-            "/tmp/backup/V-${SOURCE_VERSION}/"
-
-          cp \
-            release/MY_SHOP_FINAL_RELEASE.apk \
-            release/MY_SHOP_FINAL_RELEASE.apk.sha256 \
-            release/source-zip.sha256 \
-            release/BUILD_SOURCE_ID.txt \
-            "/tmp/backup/V-${SOURCE_VERSION}/"
-
-          cp -r \
-            release/cloudflare \
-            "/tmp/backup/V-${SOURCE_VERSION}/"
-
+          mkdir -p /tmp/backup/V-${SOURCE_VERSION}
+          cp "$SOURCE_ZIP" /tmp/backup/V-${SOURCE_VERSION}/
+          cp release/MY_SHOP_FINAL_RELEASE.apk release/MY_SHOP_FINAL_RELEASE.apk.sha256 release/source-zip.sha256 release/BUILD_SOURCE_ID.txt /tmp/backup/V-${SOURCE_VERSION}/
+          cp -r release/cloudflare /tmp/backup/V-${SOURCE_VERSION}/
           cat > /tmp/rclone.conf <<EOF
           [gdrive]
           type = drive
@@ -1033,24 +401,13 @@ jobs:
           service_account_file = /tmp/gdrive/service-account.json
           root_folder_id = ${GDRIVE_FOLDER_ID}
           EOF
-
-          "$RCLONE_BIN" copy \
-            "/tmp/backup/V-${SOURCE_VERSION}" \
-            "gdrive:V-${SOURCE_VERSION}" \
-            --config /tmp/rclone.conf \
-            --create-empty-src-dirs
-
-          "$RCLONE_BIN" size \
-            "gdrive:V-${SOURCE_VERSION}" \
-            --config /tmp/rclone.conf
-
-          echo \
-            "GOOGLE DRIVE BACKUP VERIFIED: V-${SOURCE_VERSION}"
+          "$RCLONE_BIN" copy /tmp/backup/V-${SOURCE_VERSION} "gdrive:V-${SOURCE_VERSION}" --config /tmp/rclone.conf --create-empty-src-dirs
+          "$RCLONE_BIN" size "gdrive:V-${SOURCE_VERSION}" --config /tmp/rclone.conf
+          echo "GOOGLE DRIVE BACKUP VERIFIED: V-${SOURCE_VERSION}"
 
       - name: Upload Cloudflare verification evidence
         if: always()
         uses: actions/upload-artifact@v4
-
         with:
           name: MY-SHOP-V-${{ env.SOURCE_VERSION }}-CLOUDFLARE-DIAGNOSTICS
           path: release/cloudflare
@@ -1058,13 +415,10 @@ jobs:
 
       - name: Upload exactly ONE final APK plus checksum
         uses: actions/upload-artifact@v4
-
         with:
           name: MY-SHOP-FINAL-V-${{ env.SOURCE_VERSION }}
-
           path: |
             release/MY_SHOP_FINAL_RELEASE.apk
             release/MY_SHOP_FINAL_RELEASE.apk.sha256
-
           if-no-files-found: error
           retention-days: 30
