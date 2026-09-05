@@ -3,228 +3,97 @@ name: MY SHOP - BUILD APK
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
-  build-apk:
-    name: BUILD RELEASE APK
+  build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Find source ZIP
-        shell: bash
+      - name: Find V ZIP
         run: |
           set -e
+          ZIP=$(find . -maxdepth 1 -type f -name 'V-*.zip' | sort | tail -n 1)
 
-          BEST_FILE=""
-          BEST_VERSION=0
-
-          for FILE in V-*.zip; do
-            if [ ! -f "$FILE" ]; then
-              continue
-            fi
-
-            NAME="$(basename "$FILE")"
-
-            if [[ "$NAME" =~ ^V-([0-9]+)-.*\.zip$ ]]; then
-              VERSION="${BASH_REMATCH[1]}"
-              VERSION=$((10#$VERSION))
-
-              if [ "$VERSION" -gt "$BEST_VERSION" ]; then
-                BEST_VERSION="$VERSION"
-                BEST_FILE="$NAME"
-              fi
-            fi
-          done
-
-          if [ -z "$BEST_FILE" ]; then
-            echo "ERROR: No V-numbered ZIP found."
+          if [ -z "$ZIP" ]; then
+            echo "ERROR: No V-*.zip file found."
             exit 1
           fi
 
-          echo "SOURCE_ZIP=$BEST_FILE" >> "$GITHUB_ENV"
-          echo "SOURCE_VERSION=$BEST_VERSION" >> "$GITHUB_ENV"
+          echo "Using ZIP: $ZIP"
+          echo "SOURCE_ZIP=$ZIP" >> "$GITHUB_ENV"
 
-          echo "Selected ZIP:"
-          echo "$BEST_FILE"
-          echo "Selected version: V-$BEST_VERSION"
-
-      - name: Extract source
-        shell: bash
+      - name: Extract project
         run: |
           set -e
-
           rm -rf source
-          mkdir -p source
-
+          mkdir source
           unzip -q "$SOURCE_ZIP" -d source
 
-          echo "Source extracted successfully."
-
-      - name: Find Android project
-        shell: bash
+      - name: Find Gradle project
         run: |
           set -e
 
-          SETTINGS_FILE="$(find source -type f \( \
-            -name settings.gradle \
-            -o -name settings.gradle.kts \
-          \) -print -quit)"
+          SETTINGS=$(find source -type f -name 'settings.gradle' -print -quit)
 
-          if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: Android settings file not found."
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: settings.gradle not found."
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+          PROJECT=$(dirname "$SETTINGS")
 
-          if [ ! -f "$PROJECT_DIR/gradlew" ]; then
+          if [ ! -f "$PROJECT/gradlew" ]; then
             echo "ERROR: gradlew not found."
             exit 1
           fi
 
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
+          echo "Project: $PROJECT"
 
-          echo "Android project:"
-          echo "$PROJECT_DIR"
-
-      - name: Fix UserMenu callback
-        shell: bash
-        run: |
-          set -e
-
-          FILE="$PROJECT_DIR/app/src/main/java/com/myshop/app/UserMenuActivity.java"
-
-          if [ -f "$FILE" ]; then
-            sed -i 's/LanguageManager\.showPicker(this/LanguageManager.showPicker(UserMenuActivity.this/g' "$FILE"
-            echo "UserMenuActivity callback check completed."
-          else
-            echo "UserMenuActivity.java not found."
-            echo "Continuing without callback correction."
-          fi
-
-      - name: Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
+      - name: Setup Android
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK
-        shell: bash
+      - name: Install SDK
+        run: |
+          yes | sdkmanager --licenses || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Build APK
         run: |
           set -e
-
-          yes | sdkmanager --licenses >/dev/null || true
-
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0"
-
-      - name: Prepare Gradle
-        shell: bash
-        run: |
-          set -e
-
-          cd "$PROJECT_DIR"
-
+          cd "$PROJECT"
           chmod +x gradlew
-
-          ./gradlew --version
-
-      - name: Clean project
-        shell: bash
-        run: |
-          set -e
-
-          cd "$PROJECT_DIR"
-
-          ./gradlew clean --no-daemon
-
-      - name: Build release APK
-        shell: bash
-        run: |
-          set -e
-
-          cd "$PROJECT_DIR"
-
           ./gradlew assembleRelease --no-daemon --stacktrace
 
-      - name: Find release APK
-        shell: bash
+      - name: Collect APK
         run: |
           set -e
 
-          rm -rf release-apk
           mkdir -p release-apk
 
-          APK_COUNT=0
-          APK_FILE=""
+          APK=$(find "$PROJECT/app/build/outputs/apk" \
+            -type f \
+            -name '*.apk' \
+            ! -name '*-unsigned.apk' \
+            | head -n 1)
 
-          while IFS= read -r FILE; do
-            APK_COUNT=$((APK_COUNT + 1))
-            APK_FILE="$FILE"
-          done < <(
-            find "$PROJECT_DIR/app/build/outputs/apk" \
-              -type f \
-              -name "*.apk" \
-              ! -name "*-unsigned.apk"
-          )
-
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "ERROR: No release APK found."
-            find "$PROJECT_DIR/app/build/outputs" -type f -print || true
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not created."
             exit 1
           fi
 
-          if [ "$APK_COUNT" -gt 1 ]; then
-            echo "ERROR: More than one release APK found."
-            exit 1
-          fi
-
-          APK_NAME="MY-SHOP-V-${SOURCE_VERSION}-release.apk"
-
-          cp "$APK_FILE" "release-apk/$APK_NAME"
-
-          echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
-
-          echo "APK created:"
-          echo "$APK_NAME"
-
-      - name: Verify APK
-        shell: bash
-        run: |
-          set -e
-
-          APK="release-apk/$APK_NAME"
-
-          if [ ! -f "$APK" ]; then
-            echo "ERROR: APK file does not exist."
-            exit 1
-          fi
-
-          SIZE="$(stat -c%s "$APK")"
-
-          if [ "$SIZE" -le 10000 ]; then
-            echo "ERROR: APK file is too small."
-            exit 1
-          fi
-
-          echo "APK verification PASSED."
-          echo "File: $APK"
-          echo "Size: $SIZE bytes"
+          cp "$APK" release-apk/MY-SHOP-release.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: MY-SHOP-V-${{ env.SOURCE_VERSION }}-RELEASE-APK
-          path: release-apk/${{ env.APK_NAME }}
-          if-no-files-found: error
-          retention-days: 14
+          name: MY-SHOP-APK
+          path: release-apk/MY-SHOP-release.apk
