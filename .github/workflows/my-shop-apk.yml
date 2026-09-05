@@ -8,86 +8,82 @@ permissions:
 
 jobs:
   build-apk:
-    name: BUILD → RELEASE APK
+    name: BUILD RELEASE APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find newest V-numbered source ZIP
+      - name: Find source ZIP
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           BEST_FILE=""
-          BEST_VERSION=-1
+          BEST_VERSION=0
 
-          while IFS= read -r FILE; do
+          for FILE in V-*.zip; do
+            if [ ! -f "$FILE" ]; then
+              continue
+            fi
+
             NAME="$(basename "$FILE")"
 
-            if [[ "$NAME" =~ ^V-([0-9]+)-.+\.zip$ ]]; then
+            if [[ "$NAME" =~ ^V-([0-9]+)-.*\.zip$ ]]; then
               VERSION="${BASH_REMATCH[1]}"
               VERSION=$((10#$VERSION))
 
-              if (( VERSION > BEST_VERSION )); then
+              if [ "$VERSION" -gt "$BEST_VERSION" ]; then
                 BEST_VERSION="$VERSION"
                 BEST_FILE="$NAME"
               fi
             fi
-          done < <(find . -maxdepth 1 -type f -name 'V-*.zip' | sort)
+          done
 
           if [ -z "$BEST_FILE" ]; then
-            echo "ERROR: No V-*.zip file found in repository root."
+            echo "ERROR: No V-numbered ZIP found."
             exit 1
           fi
 
           echo "SOURCE_ZIP=$BEST_FILE" >> "$GITHUB_ENV"
           echo "SOURCE_VERSION=$BEST_VERSION" >> "$GITHUB_ENV"
 
-          echo "Selected source:"
+          echo "Selected ZIP:"
           echo "$BEST_FILE"
-          echo "Version: V-$BEST_VERSION"
+          echo "Selected version: V-$BEST_VERSION"
 
-      - name: Extract source project
+      - name: Extract source
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           rm -rf source
           mkdir -p source
 
           unzip -q "$SOURCE_ZIP" -d source
 
-          echo "Extracted:"
-          find source -maxdepth 3 -type f | head -100
+          echo "Source extracted successfully."
 
-      - name: Locate Android project
+      - name: Find Android project
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          SETTINGS_FILE="$(find source -type f \
-            -name 'settings.gradle' \
-            -o \
-            -name 'settings.gradle.kts' \
-          -print -quit)"
+          SETTINGS_FILE="$(find source -type f \( \
+            -name settings.gradle \
+            -o -name settings.gradle.kts \
+          \) -print -quit)"
 
           if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: settings.gradle or settings.gradle.kts not found."
+            echo "ERROR: Android settings file not found."
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
 
           if [ ! -f "$PROJECT_DIR/gradlew" ]; then
-            echo "ERROR: gradlew not found in Android project."
-            exit 1
-          fi
-
-          if [ ! -f "$PROJECT_DIR/app/build.gradle" ] && \
-             [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
-            echo "ERROR: app Gradle file not found."
+            echo "ERROR: gradlew not found."
             exit 1
           fi
 
@@ -96,20 +92,139 @@ jobs:
           echo "Android project:"
           echo "$PROJECT_DIR"
 
-      - name: Fix callback context safely
+      - name: Fix UserMenu callback
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           FILE="$PROJECT_DIR/app/src/main/java/com/myshop/app/UserMenuActivity.java"
 
-          if [ ! -f "$FILE" ]; then
-            echo "WARNING: UserMenuActivity.java not found."
-            echo "Skipping callback-context correction."
-            exit 0
+          if [ -f "$FILE" ]; then
+            sed -i 's/LanguageManager\.showPicker(this/LanguageManager.showPicker(UserMenuActivity.this/g' "$FILE"
+            echo "UserMenuActivity callback check completed."
+          else
+            echo "UserMenuActivity.java not found."
+            echo "Continuing without callback correction."
           fi
 
-          echo "Checking callback context..."
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-          sed -i \
-            's/LanguageManager\.showPicker(this/LanguageManager.showPicker(UserMenuActivity.this/g'
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -e
+
+          yes | sdkmanager --licenses >/dev/null || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+
+      - name: Prepare Gradle
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          chmod +x gradlew
+
+          ./gradlew --version
+
+      - name: Clean project
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          ./gradlew clean --no-daemon
+
+      - name: Build release APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Find release APK
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf release-apk
+          mkdir -p release-apk
+
+          APK_COUNT=0
+          APK_FILE=""
+
+          while IFS= read -r FILE; do
+            APK_COUNT=$((APK_COUNT + 1))
+            APK_FILE="$FILE"
+          done < <(
+            find "$PROJECT_DIR/app/build/outputs/apk" \
+              -type f \
+              -name "*.apk" \
+              ! -name "*-unsigned.apk"
+          )
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "ERROR: No release APK found."
+            find "$PROJECT_DIR/app/build/outputs" -type f -print || true
+            exit 1
+          fi
+
+          if [ "$APK_COUNT" -gt 1 ]; then
+            echo "ERROR: More than one release APK found."
+            exit 1
+          fi
+
+          APK_NAME="MY-SHOP-V-${SOURCE_VERSION}-release.apk"
+
+          cp "$APK_FILE" "release-apk/$APK_NAME"
+
+          echo "APK_NAME=$APK_NAME" >> "$GITHUB_ENV"
+
+          echo "APK created:"
+          echo "$APK_NAME"
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -e
+
+          APK="release-apk/$APK_NAME"
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: APK file does not exist."
+            exit 1
+          fi
+
+          SIZE="$(stat -c%s "$APK")"
+
+          if [ "$SIZE" -le 10000 ]; then
+            echo "ERROR: APK file is too small."
+            exit 1
+          fi
+
+          echo "APK verification PASSED."
+          echo "File: $APK"
+          echo "Size: $SIZE bytes"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MY-SHOP-V-${{ env.SOURCE_VERSION }}-RELEASE-APK
+          path: release-apk/${{ env.APK_NAME }}
+          if-no-files-found: error
+          retention-days: 14
