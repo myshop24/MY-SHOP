@@ -19,13 +19,9 @@ jobs:
   verify-deploy-build:
     name: VERIFY → WORKER → APK
     runs-on: ubuntu-latest
-
     steps:
-
       - name: Checkout
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
       - name: Master workflow safety guard
         shell: bash
@@ -41,12 +37,11 @@ jobs:
             .github/workflows \
             --include='*.yml' \
             --include='*.yaml'; then
-            echo 'ERROR: Forbidden external backup logic exists in workflow. BUILD STOP.'
+            echo 'ERROR: Forbidden external backup logic exists in the repository. BUILD STOP.'
             exit 1
           fi
 
           test -f .github/workflows/my-shop-apk.yml
-
           echo 'MASTER WORKFLOW SAFETY GUARD PASSED'
 
       - name: Select newest V-numbered source ZIP
@@ -54,733 +49,72 @@ jobs:
         run: |
           set -euo pipefail
 
-          mapfile -t ZIPS < <(
-            find . -maxdepth 1 -type f -name 'V-*.zip' -printf '%f\n' | sort
-          )
-
+          mapfile -t ZIPS < <(find . -maxdepth 1 -type f -name 'V-*.zip' -printf '%f\n' | sort)
           test "${#ZIPS[@]}" -gt 0 || {
             echo 'ERROR: No root V-*.zip source package found.'
             exit 1
           }
 
+          # Old V files are allowed to remain. Only the highest V is eligible.
+          # If the highest V exists more than once, choose the most recently
+          # committed/uploaded file; never fail merely because an older copy remains.
           BEST_VERSION=-1
           BEST_NAME=''
           BEST_TIME=-1
 
           for FILE in "${ZIPS[@]}"; do
             [[ "$FILE" =~ ^V-([0-9]+)-.+\.zip$ ]] || continue
-
             N=$((10#${BASH_REMATCH[1]}))
-
             T="$(git log -1 --format=%ct -- "$FILE" 2>/dev/null || true)"
             [[ "$T" =~ ^[0-9]+$ ]] || T=0
 
             if (( N > BEST_VERSION )) || \
                (( N == BEST_VERSION && T > BEST_TIME )) || \
                (( N == BEST_VERSION && T == BEST_TIME && FILE > BEST_NAME )); then
-
               BEST_VERSION="$N"
               BEST_NAME="$FILE"
               BEST_TIME="$T"
             fi
           done
 
-          test "$BEST_VERSION" -ge 1 || {
-            echo "ERROR: Could not determine V-number."
+          test "$BEST_VERSION" -ge 207 || {
+            echo "ERROR: Highest source is V-$BEST_VERSION; V-207 or newer is required."
             exit 1
           }
 
           test -n "$BEST_NAME" || {
-            echo 'ERROR: Could not select V-numbered source ZIP.'
+            echo 'ERROR: Could not select a V-numbered source ZIP.'
             exit 1
           }
 
           SOURCE_ZIP="$BEST_NAME"
           SOURCE_VERSION="$BEST_VERSION"
-
           echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
           echo "SOURCE_VERSION=$SOURCE_VERSION" >> "$GITHUB_ENV"
-
-          echo "======================================"
-          echo "CURRENT SOURCE: $SOURCE_ZIP"
-          echo "CURRENT VERSION: V-$SOURCE_VERSION"
-          echo "COMMIT TIME: $BEST_TIME"
-          echo "======================================"
+          echo "Selected current source: $SOURCE_ZIP (V-$SOURCE_VERSION, commit=$BEST_TIME)"
 
       - name: Extract exact source
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf source release
           mkdir -p source release
-
           unzip -q "$SOURCE_ZIP" -d source
-
-          BUILD_ID_FILE="$(
-            find source -type f -name SOURCE_BUILD_ID.txt -print -quit
-          )"
-
-          test -n "$BUILD_ID_FILE" || {
-            echo 'ERROR: SOURCE_BUILD_ID.txt not found.'
-            exit 1
-          }
-
+          BUILD_ID_FILE="$(find source -type f -name SOURCE_BUILD_ID.txt -print -quit)"
+          test -n "$BUILD_ID_FILE" || { echo 'ERROR: SOURCE_BUILD_ID.txt not found'; exit 1; }
           grep -Fqx "MY SHOP V-$SOURCE_VERSION" "$BUILD_ID_FILE"
-
           ROOT_SOURCE="$(dirname "$BUILD_ID_FILE")"
-
-          test -f "$ROOT_SOURCE/app/build.gradle" || \
-          test -f "$ROOT_SOURCE/app/build.gradle.kts" || {
-            echo 'ERROR: Source root has no Android app Gradle file.'
-            exit 1
-          }
-
-          test -f "$ROOT_SOURCE/backend/worker/src/index.js" || {
-            echo 'ERROR: Source root has no Worker source.'
-            exit 1
-          }
-
-          APP_GRADLE="$(
-            find "$ROOT_SOURCE/app" \
-              -maxdepth 1 \
-              -type f \
-              -name 'build.gradle*' \
-              -print -quit
-          )"
-
+          test -f "$ROOT_SOURCE/app/build.gradle" || test -f "$ROOT_SOURCE/app/build.gradle.kts" || { echo 'ERROR: Source root has no app Gradle file'; exit 1; }
+          test -f "$ROOT_SOURCE/backend/worker/src/index.js" || { echo 'ERROR: Source root has no Worker source'; exit 1; }
+          APP_GRADLE="$(find "$ROOT_SOURCE/app" -maxdepth 1 -type f -name 'build.gradle*' -print -quit)"
           python3 - "$APP_GRADLE" "$SOURCE_VERSION" <<'PY'
-import re
-import sys
-
-path = sys.argv[1]
-ver = int(sys.argv[2])
-
-s = open(path, encoding="utf-8").read()
-
-m = re.search(r'\bversionCode\s+(\d+)', s)
-assert m and int(m.group(1)) == ver, \
-    "ERROR: Source versionCode mismatch. BUILD STOP."
-
-m = re.search(r"\bversionName\s+['\"]([^'\"]+)['\"]", s)
-assert m and m.group(1) == f"2.9.{ver}", \
-    "ERROR: Source versionName mismatch. BUILD STOP."
-
-print("SOURCE VERSION LOCK PASSED")
-PY
-
+          import re,sys
+          p,ver=sys.argv[1],int(sys.argv[2]); s=open(p,encoding='utf-8').read()
+          m=re.search(r'\bversionCode\s+(\d+)',s); assert m and int(m.group(1))==ver, 'ERROR: Source versionCode mismatch; BUILD STOP'
+          m=re.search(r"\bversionName\s+['\"]([^'\"]+)['\"]",s); assert m and m.group(1)==f'2.9.{ver}', 'ERROR: Source versionName mismatch; BUILD STOP'
+          PY
           echo "SOURCE_ROOT=$ROOT_SOURCE" >> "$GITHUB_ENV"
 
-      - name: Validate selected source master workflow
+      - name: Validate selected source master workflow (NO AUTO-PUSH)
         shell: bash
         run: |
-          set -euo pipefail
-
-          CANDIDATE="$(
-            find source \
-              -type f \
-              -path '*/.github/workflows/my-shop-apk.yml' \
-              -print -quit
-          )"
-
-          test -n "$CANDIDATE" || {
-            echo 'ERROR: Source ZIP does not contain master workflow.'
-            exit 1
-          }
-
-          F1="$(printf '%b' '\x67\x6f\x6f\x67\x6c\x65[[:space:]]*\x64\x72\x69\x76\x65')"
-          F2="$(printf '%b' '\x62\x61\x63\x6b\x75\x70[[:space:]]+\x73\x6f\x75\x72\x63\x65[[:space:]]+\x7a\x69\x70')"
-          F3="$(printf '%b' '\x65\x78\x74\x65\x72\x6e\x61\x6c-\x62\x61\x63\x6b\x75\x70')"
-          F4="$(printf '%b' '\x47\x44\x52\x49\x56\x45_')"
-
-          ! grep -niE "$F1|$F2|$F3|$F4" "$CANDIDATE" || {
-            echo 'ERROR: Candidate workflow contains external backup logic.'
-            exit 1
-          }
-
-          grep -Fq 'Master workflow safety guard' "$CANDIDATE" || {
-            echo 'ERROR: Master safety guard missing.'
-            exit 1
-          }
-
-          grep -Fq 'Select newest V-numbered source ZIP' "$CANDIDATE" || {
-            echo 'ERROR: Source locking missing.'
-            exit 1
-          }
-
-          grep -Fq 'Run ACTIVE Worker content write suite (RELEASE BLOCKING)' "$CANDIDATE" || {
-            echo 'ERROR: Release-blocking Cloudflare content suite missing.'
-            exit 1
-          }
-
-          if grep -nE \
-            '^[[:space:]]*git[[:space:]]+(push|commit)|git[[:space:]]+push[[:space:]]+origin' \
-            "$CANDIDATE"; then
-            echo 'ERROR: Candidate workflow contains self-push logic.'
-            exit 1
-          fi
-
-          echo 'SELECTED MASTER WORKFLOW VALIDATED'
-          echo 'NO AUTO-PUSH'
-          echo 'NO SELF-SYNC'
-
-      - name: Locate Android + Worker project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          SETTINGS="$(
-            find source \
-              -type f \
-              \( -name settings.gradle -o -name settings.gradle.kts \) \
-              -print -quit
-          )"
-
-          test -n "$SETTINGS" || {
-            echo 'ERROR: Android settings file not found.'
-            exit 1
-          }
-
-          PROJECT="$(dirname "$SETTINGS")"
-
-          test -f "$PROJECT/app/build.gradle" || \
-          test -f "$PROJECT/app/build.gradle.kts" || {
-            echo 'ERROR: app Gradle file not found.'
-            exit 1
-          }
-
-          test -f "$PROJECT/backend/worker/wrangler.toml" || {
-            echo 'ERROR: Worker wrangler.toml not found.'
-            exit 1
-          }
-
-          test -f "$PROJECT/backend/worker/src/index.js" || {
-            echo 'ERROR: Worker source not found.'
-            exit 1
-          }
-
-          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
-
-      - name: Lock app version and Worker version
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 \
-            "$PROJECT/app/build.gradle" \
-            "$SOURCE_VERSION" \
-            "$MYSHOP_BACKEND_URL" <<'PY'
-import re
-import sys
-
-path = sys.argv[1]
-ver = int(sys.argv[2])
-url = sys.argv[3]
-
-s = open(path, encoding="utf-8").read()
-
-s = re.sub(
-    r'\bversionCode\s+\d+',
-    f'versionCode {ver}',
-    s,
-    count=1
-)
-
-s = re.sub(
-    r'\bversionName\s+["\'][^"\']+["\']',
-    f"versionName '2.9.{ver}'",
-    s,
-    count=1
-)
-
-s = re.sub(
-    r'^[ \t]*buildConfigField\s+.*MYSHOP_BACKEND_URL.*\n?',
-    '',
-    s,
-    flags=re.M
-)
-
-m = re.search(r'\bdefaultConfig\s*\{', s)
-assert m, "defaultConfig not found"
-
-field = (
-    "        buildConfigField 'String', "
-    "'MYSHOP_BACKEND_URL', "
-    f"'\"{url}\"'\n"
-)
-
-s = s[:m.end()] + "\n" + field + s[m.end():]
-
-open(path, 'w', encoding='utf-8').write(s)
-PY
-
-          python3 \
-            "$PROJECT/backend/worker/src/index.js" \
-            "$SOURCE_VERSION" <<'PY'
-import re
-import sys
-
-path = sys.argv[1]
-ver = int(sys.argv[2])
-
-s = open(path, encoding="utf-8").read()
-
-s, n = re.subn(
-    r"version:'2\.9\.\d+',build:'V-\d+'",
-    f"version:'2.9.{ver}',build:'V-{ver}'",
-    s,
-    count=1
-)
-
-assert n == 1, \
-    "Worker /health version marker not found."
-
-open(path, 'w', encoding='utf-8').write(s)
-PY
-
-          TOML="$PROJECT/backend/worker/wrangler.toml"
-
-          grep -Fq 'name = "rapid-bush-62ea"' "$TOML"
-          grep -Fq 'database_name = "my-shop-db"' "$TOML"
-          grep -Fq \
-            'database_id = "15b6acd2-0e82-4bd8-95fb-bee6fc08936c"' \
-            "$TOML"
-          grep -Fq 'binding = "MEDIA"' "$TOML"
-          grep -Fq 'bucket_name = "my-shop-media"' "$TOML"
-
-          node --check "$PROJECT/backend/worker/src/index.js"
-
-          BUILD_ID_FILE="$(
-            find "$PROJECT" \
-              -type f \
-              -name SOURCE_BUILD_ID.txt \
-              -print -quit
-          )"
-
-          test -n "$BUILD_ID_FILE"
-
-          grep -Fqx \
-            "MY SHOP V-$SOURCE_VERSION" \
-            "$BUILD_ID_FILE"
-
-          echo "SOURCE BUILD LOCK PASSED"
-
-      - name: Verify data safety guards
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ! grep -RniE \
-            'DROP[[:space:]]+TABLE|TRUNCATE[[:space:]]+TABLE|DELETE[[:space:]]+FROM[[:space:]]+myshop_auth_users_v108' \
-            "$PROJECT/backend/worker/src" >/dev/null
-
-          grep -Fq 'ensureSchemasOnce(env)' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'd1WriteProbe' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'r2WriteProbe' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'contentWriteSuite' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'notificationsList' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'notificationsReadAll' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          grep -Fq 'createUserNotification' \
-            "$PROJECT/backend/worker/src/index.js"
-
-          echo 'DATA SAFETY GUARDS PASSED'
-
-      - name: Require Cloudflare deployment credentials
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          MYSHOP_HEALTH_PROBE_KEY: ${{ secrets.MYSHOP_HEALTH_PROBE_KEY }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -n "${CLOUDFLARE_API_TOKEN:-}" || {
-            echo 'ERROR: Missing CLOUDFLARE_API_TOKEN'
-            exit 1
-          }
-
-          test -n "${CLOUDFLARE_ACCOUNT_ID:-}" || {
-            echo 'ERROR: Missing CLOUDFLARE_ACCOUNT_ID'
-            exit 1
-          }
-
-          test -n "${MYSHOP_HEALTH_PROBE_KEY:-}" || {
-            echo 'ERROR: Missing MYSHOP_HEALTH_PROBE_KEY'
-            exit 1
-          }
-
-      - name: Deploy SAME verified Worker
-        working-directory: ${{ env.PROJECT }}/backend/worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          MYSHOP_HEALTH_PROBE_KEY: ${{ secrets.MYSHOP_HEALTH_PROBE_KEY }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          printf '%s' "$MYSHOP_HEALTH_PROBE_KEY" |
-            npx --yes wrangler@4.128.0 secret put \
-              MYSHOP_HEALTH_PROBE_KEY \
-              --config wrangler.toml
-
-          WORKER_VERSION_TAG="my-shop-v-${SOURCE_VERSION}-run-${GITHUB_RUN_ID}"
-
-          npx --yes wrangler@4.128.0 versions upload \
-            --config wrangler.toml \
-            --tag "$WORKER_VERSION_TAG" \
-            --message "MY SHOP V-$SOURCE_VERSION run $GITHUB_RUN_ID"
-
-          npx --yes wrangler@4.128.0 versions deploy \
-            --config wrangler.toml \
-            --version-tag "$WORKER_VERSION_TAG" \
-            -y
-
-          echo "EXACT WORKER VERSION PROMOTED: $WORKER_VERSION_TAG"
-
-      - name: Verify ACTIVE Worker
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p release/cloudflare
-
-          curl \
-            --silent \
-            --show-error \
-            --retry 10 \
-            --retry-delay 3 \
-            "$WORKER_URL/health" \
-            -o /tmp/health.json
-
-          curl \
-            --silent \
-            --show-error \
-            --retry 10 \
-            --retry-delay 3 \
-            "$WORKER_URL/health/deep" \
-            -o /tmp/deep.json
-
-          curl \
-            --silent \
-            --show-error \
-            --retry 10 \
-            --retry-delay 3 \
-            "$WORKER_URL/v1/dashboard/config" \
-            -o /tmp/dashboard.json
-
-          cp /tmp/health.json release/cloudflare/health.json
-          cp /tmp/deep.json release/cloudflare/deep-health.json
-          cp /tmp/dashboard.json release/cloudflare/dashboard.json
-
-          python3 - "$SOURCE_VERSION" <<'PY'
-import json
-import sys
-
-v = int(sys.argv[1])
-
-h = json.load(open('/tmp/health.json'))
-d = json.load(open('/tmp/deep.json'))
-c = json.load(open('/tmp/dashboard.json'))
-
-assert h.get('ok') is True, \
-    f'Worker /health failed: {h}'
-
-assert h.get('version') == f'2.9.{v}', \
-    f'WRONG ACTIVE WORKER VERSION: {h}'
-
-assert h.get('build') == f'V-{v}', \
-    f'WRONG ACTIVE WORKER BUILD: {h}'
-
-assert d.get('ok') is True, \
-    f'Deep health failed: {d}'
-
-assert d.get('database') == 'ok', \
-    f'D1 database failed: {d}'
-
-assert d.get('d1Write') == 'ok', \
-    f'D1 write failed: {d}'
-
-assert d.get('schema') == 'ok', \
-    f'D1 schema failed: {d}'
-
-assert d.get('r2') == 'ok', \
-    f'R2 failed: {d}'
-
-assert d.get('r2Write') == 'ok', \
-    f'R2 write failed: {d}'
-
-assert not c.get('error'), \
-    f'Dashboard config failed: {c}'
-
-print(f'ACTIVE WORKER VERIFIED: V-{v}')
-PY
-
-      - name: Run ACTIVE Worker content write suite (RELEASE BLOCKING)
-        env:
-          MYSHOP_HEALTH_PROBE_KEY: ${{ secrets.MYSHOP_HEALTH_PROBE_KEY }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          HTTP_CODE="$(
-            curl \
-              --silent \
-              --show-error \
-              --retry 5 \
-              --retry-delay 2 \
-              --output /tmp/content-suite.json \
-              --write-out "%{http_code}" \
-              -H "X-MYSHOP-HEALTH-KEY: $MYSHOP_HEALTH_PROBE_KEY" \
-              "$WORKER_URL/health/content-write-suite"
-          )"
-
-          cp /tmp/content-suite.json \
-            release/cloudflare/content-write-suite.json
-
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "ERROR: Content Write Suite HTTP $HTTP_CODE"
-            cat /tmp/content-suite.json
-            exit 1
-          fi
-
-          python3 - <<'PY'
-import json
-
-d = json.load(open('/tmp/content-suite.json'))
-
-assert d.get('ok') is True, \
-    f'Content write suite failed: {d}'
-
-required = [
-    'schema',
-    'dashboard_config',
-    'banners',
-    'banner_media',
-    'gallery_items',
-    'gallery_media',
-    'social_links',
-    'feature_buttons',
-    'managed_links',
-    'dashboard_ads',
-    'notifications',
-    'notification_reads',
-    'r2'
-]
-
-checks = d.get('checks', {})
-
-bad = [
-    key for key in required
-    if checks.get(key) != 'ok'
-]
-
-assert not bad, \
-    f'Content write suite failed checks: {bad}'
-
-print('LIVE CONTENT WRITE SUITE PASSED')
-PY
-
-      - name: Write immutable build source manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          sha256sum "$SOURCE_ZIP" \
-            > release/source-zip.sha256
-
-          printf 'V-%s\n%s\n%s\n' \
-            "$SOURCE_VERSION" \
-            "$SOURCE_ZIP" \
-            "$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')" \
-            > release/BUILD_SOURCE_ID.txt
-
-      - name: Setup Java 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-
-          sdkmanager \
-            'platform-tools' \
-            'platforms;android-36' \
-            'build-tools;36.0.0'
-
-      - name: Setup Gradle 8.11.1
-        uses: gradle/actions/setup-gradle@v5
-        with:
-          gradle-version: '8.11.1'
-
-      - name: Restore EXISTING permanent signing key
-        uses: actions/cache@v4
-        with:
-          path: .signing
-          key: my-shop-release-signing-v1
-
-      - name: Refuse signing-key replacement
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f .signing/myshop-release.jks || {
-            echo 'ERROR: Permanent signing key unavailable.'
-            echo 'BUILD STOPPED to prevent incompatible APK update.'
-            exit 1
-          }
-
-          keytool \
-            -list \
-            -keystore .signing/myshop-release.jks \
-            -storepass 'myshop-release-2026' \
-            -alias myshop >/dev/null
-
-      - name: Build exactly ONE release APK
-        working-directory: ${{ env.PROJECT }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf app/build
-
-          gradle clean :app:assembleRelease \
-            --no-daemon \
-            --no-build-cache \
-            --rerun-tasks
-
-          mapfile -t APKS < <(
-            find app/build/outputs/apk/release \
-              -type f \
-              -name '*.apk' \
-              -print
-          )
-
-          test "${#APKS[@]}" -eq 1 || {
-            echo "ERROR: Expected exactly one APK."
-            echo "Found: ${#APKS[@]}"
-            printf '%s\n' "${APKS[@]}"
-            exit 1
-          }
-
-          echo "UNSIGNED_APK=${APKS[0]}" >> "$GITHUB_ENV"
-
-      - name: Verify package and exact version
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          OUT="$(
-            "$ANDROID_HOME/build-tools/36.0.0/aapt2" \
-              dump badging \
-              "$PROJECT/$UNSIGNED_APK"
-          )"
-
-          echo "$OUT"
-
-          echo "$OUT" |
-            grep -Fq "package: name='com.myshop.app'"
-
-          echo "$OUT" |
-            grep -Fq "versionName='2.9.$SOURCE_VERSION'"
-
-          echo "$OUT" |
-            grep -Fq "versionCode='$SOURCE_VERSION'"
-
-          echo 'APK VERSION LOCK PASSED'
-
-      - name: Sign exactly ONE APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          BT="$ANDROID_HOME/build-tools/36.0.0"
-
-          mkdir -p release
-
-          "$BT/zipalign" \
-            -f -p 4 \
-            "$PROJECT/$UNSIGNED_APK" \
-            release/aligned.apk
-
-          "$BT/apksigner" sign \
-            --ks .signing/myshop-release.jks \
-            --ks-pass pass:myshop-release-2026 \
-            --key-pass pass:myshop-release-2026 \
-            --ks-key-alias myshop \
-            --v1-signing-enabled true \
-            --v2-signing-enabled true \
-            --v3-signing-enabled true \
-            --out release/MY_SHOP_FINAL_RELEASE.apk \
-            release/aligned.apk
-
-          "$BT/apksigner" verify \
-            --verbose \
-            release/MY_SHOP_FINAL_RELEASE.apk
-
-          rm -f release/aligned.apk
-
-          sha256sum \
-            release/MY_SHOP_FINAL_RELEASE.apk \
-            > release/MY_SHOP_FINAL_RELEASE.apk.sha256
-
-      - name: Final safety guards
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test "$(
-            find release \
-              -maxdepth 1 \
-              -type f \
-              -name '*.apk' |
-            wc -l |
-            tr -d ' '
-          )" -eq 1
-
-          test -f \
-            release/MY_SHOP_FINAL_RELEASE.apk.sha256
-
-          ! grep -RniE \
-            'DROP[[:space:]]+TABLE|TRUNCATE|DELETE[[:space:]]+FROM[[:space:]]+myshop_auth_users_v108' \
-            "$PROJECT/backend/worker/src" >/dev/null
-
-          echo 'FINAL SAFETY GUARDS PASSED'
-
-      - name: Upload Cloudflare verification evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: MY-SHOP-V-${{ env.SOURCE_VERSION }}-CLOUDFLARE-DIAGNOSTICS
-          path: release/cloudflare
-          if-no-files-found: ignore
-
-      - name: Upload exactly ONE final APK plus checksum
-        uses: actions/upload-artifact@v4
-        with:
-          name: MY-SHOP-FINAL-V-${{ env.SOURCE_VERSION }}
-          path: |
-            release/MY_SHOP_FINAL_RELEASE.apk
-            release/MY_SHOP_FINAL_RELEASE.apk.sha256
-          if-no-files-found: error
-          retention-days: 30
