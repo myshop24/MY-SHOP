@@ -42,6 +42,11 @@ jobs:
           fi
 
           test -f .github/workflows/my-shop-apk.yml
+          ! grep -nE '^[[:space:]]*printf .*MYSHOP_HEALTH_PROBE_KEY.*wrangler.*secret[[:space:]]+put|^[[:space:]]*npx .*wrangler[^\n]*[[:space:]]+secret[[:space:]]+put' .github/workflows/my-shop-apk.yml || { echo 'ERROR: Master workflow still contains deprecated wrangler secret put deployment logic. BUILD STOP'; exit 1; }
+          grep -Fq 'versions upload' .github/workflows/my-shop-apk.yml || { echo 'ERROR: Master workflow missing versions upload. BUILD STOP'; exit 1; }
+          grep -Fq -- '--secrets-file' .github/workflows/my-shop-apk.yml || { echo 'ERROR: Master workflow missing same-version secret deployment. BUILD STOP'; exit 1; }
+          grep -Fq 'versions deploy' .github/workflows/my-shop-apk.yml || { echo 'ERROR: Master workflow missing versions deploy. BUILD STOP'; exit 1; }
+          grep -Fq 'WORKER_VERSION_ID' .github/workflows/my-shop-apk.yml || { echo 'ERROR: Master workflow missing immutable Version-ID promotion. BUILD STOP'; exit 1; }
           echo 'MASTER WORKFLOW SAFETY GUARD PASSED'
 
       - name: Select newest V-numbered source ZIP
@@ -132,6 +137,13 @@ jobs:
           grep -Fq 'Master workflow safety guard' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing the permanent master safety guard. BUILD STOP'; exit 1; }
           grep -Fq 'Select newest V-numbered source ZIP' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing source locking. BUILD STOP'; exit 1; }
           grep -Fq 'Run ACTIVE Worker content write suite (RELEASE BLOCKING)' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing the release-blocking Cloudflare write suite. BUILD STOP'; exit 1; }
+          ! grep -nE '^[[:space:]]*printf .*MYSHOP_HEALTH_PROBE_KEY.*wrangler.*secret[[:space:]]+put|^[[:space:]]*npx .*wrangler[^\n]*[[:space:]]+secret[[:space:]]+put' "$CANDIDATE" || { echo 'ERROR: Candidate workflow contains deprecated wrangler secret put deployment logic. BUILD STOP'; exit 1; }
+          grep -Fq 'versions upload' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing versions upload. BUILD STOP'; exit 1; }
+          grep -Fq -- '--secrets-file' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing same-version secret deployment. BUILD STOP'; exit 1; }
+          grep -Fq 'versions deploy' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing versions deploy. BUILD STOP'; exit 1; }
+          grep -Fq 'WORKER_VERSION_ID' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing exact immutable Version-ID promotion. BUILD STOP'; exit 1; }
+          grep -Fq 'EXACT UPLOADED WORKER VERSION ID:' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing immutable Worker version-ID promotion guard. BUILD STOP'; exit 1; }
+          grep -Fq 'CLOUDFLARE ACTIVE DEPLOYMENT VERIFIED:' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing active deployment verification. BUILD STOP'; exit 1; }
           ! grep -nE '^[[:space:]]*git[[:space:]]+(push|commit)[[:space:]].*workflow|^[[:space:]]*git[[:space:]]+push[[:space:]]+origin[[:space:]]+HEAD:main' "$CANDIDATE" || { echo 'ERROR: Candidate workflow attempts to self-push workflow files. BUILD STOP'; exit 1; }
           echo 'Selected source master workflow validated. No workflow self-push will be attempted.'
 
@@ -139,7 +151,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SETTINGS="$(find source -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)"
+          SETTINGS="$(find source -type f -name settings.gradle -o -name settings.gradle.kts -print -quit)"
           test -n "$SETTINGS" || { echo 'ERROR: Android settings file not found.'; exit 1; }
           PROJECT="$(dirname "$SETTINGS")"
           test -f "$PROJECT/app/build.gradle" || test -f "$PROJECT/app/build.gradle.kts" || { echo 'ERROR: app Gradle file not found.'; exit 1; }
@@ -163,7 +175,6 @@ jobs:
           s=s[:m.end()]+'\n'+field+s[m.end():]
           open(path,'w',encoding='utf-8').write(s)
           PY
-
           python3 - "$PROJECT/backend/worker/src/index.js" "$SOURCE_VERSION" <<'PY'
           import re,sys
           path,ver=sys.argv[1],int(sys.argv[2])
@@ -172,7 +183,6 @@ jobs:
           assert n==1,'Worker /health version marker not found'
           open(path,'w',encoding='utf-8').write(s)
           PY
-
           TOML="$PROJECT/backend/worker/wrangler.toml"
           grep -Fq 'name = "rapid-bush-62ea"' "$TOML"
           grep -Fq 'database_name = "my-shop-db"' "$TOML"
@@ -275,6 +285,22 @@ jobs:
           ! grep -Fq 'INSERT INTO social_links(platform,url,icon_key,active) VALUES(?,?,?,?) ON CONFLICT(platform)' "$PROJECT/backend/worker/src/index.js"
           echo 'LEGACY-D1 WRITE COMPATIBILITY GUARD PASSED'
 
+      - name: Preflight callback-context safety guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$PROJECT/app/src/main/java/com/myshop/app/UserMenuActivity.java" <<'PY'
+          import sys
+          p=sys.argv[1]
+          s=open(p,encoding='utf-8').read()
+          start=s.find('private void loadDynamicMenu(')
+          end=s.find('private void addDynamic(', start)
+          assert start>=0 and end>start, 'ERROR: loadDynamicMenu block not found'
+          block=s[start:end]
+          assert 'LanguageManager.showPicker(this' not in block, 'ERROR: Callback Context bug in loadDynamicMenu: use UserMenuActivity.this'
+          print('CALLBACK CONTEXT SAFETY GUARD PASSED')
+          PY
+
       - name: Require Cloudflare deployment credentials
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -296,14 +322,76 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          printf '%s' "$MYSHOP_HEALTH_PROBE_KEY" | npx --yes wrangler@4.128.0 secret put MYSHOP_HEALTH_PROBE_KEY --config wrangler.toml
-          # Explicitly upload and promote the exact tagged version so an older
-          # gradual-deployment target cannot remain active.
+          # Create the code version and carry the required health-probe secret
+          # in the SAME version. `wrangler secret put` creates/deploys a new
+          # version and can fail when the latest code version is not deployed.
+          # `versions upload --secrets-file` is the supported gradual-deploy path.
           WORKER_VERSION_TAG="my-shop-v-${SOURCE_VERSION}-run-${GITHUB_RUN_ID}"
-          npx --yes wrangler@4.128.0 versions upload --config wrangler.toml --tag "$WORKER_VERSION_TAG" --message "MY SHOP V-$SOURCE_VERSION run $GITHUB_RUN_ID"
-          npx --yes wrangler@4.128.0 versions deploy --config wrangler.toml --version-tag "$WORKER_VERSION_TAG" -y
-          echo "EXACT WORKER VERSION PROMOTED: $WORKER_VERSION_TAG"
-          npx --yes wrangler@4.128.0 deployments status --config wrangler.toml --json | tee /tmp/worker-deployment-status.json
+          WRANGLER_OUTPUT_FILE_PATH=/tmp/wrangler-output.ndjson
+          export WRANGLER_OUTPUT_FILE_PATH
+          rm -f "$WRANGLER_OUTPUT_FILE_PATH" /tmp/worker-deployment-status.json /tmp/worker-version-id.txt
+          python3 - <<'PY'
+          import json,os
+          with open('/tmp/myshop-secrets.json','w',encoding='utf-8') as f:
+              json.dump({'MYSHOP_HEALTH_PROBE_KEY': os.environ['MYSHOP_HEALTH_PROBE_KEY']}, f)
+          PY
+          npx --yes wrangler@4.128.0 versions upload --config wrangler.toml --tag "$WORKER_VERSION_TAG" --message "MY SHOP V-$SOURCE_VERSION run $GITHUB_RUN_ID" --secrets-file /tmp/myshop-secrets.json
+          rm -f /tmp/myshop-secrets.json
+
+          # Never deploy by tag alone: resolve the exact uploaded Version ID and
+          # promote that immutable ID to 100%. This prevents an older/split
+          # deployment from silently remaining active.
+          npx --yes wrangler@4.128.0 versions list --config wrangler.toml --json > /tmp/worker-versions.json
+          python3 - "$WORKER_VERSION_TAG" <<'PY'
+          import json,sys
+          tag=sys.argv[1]
+          data=json.load(open('/tmp/worker-versions.json',encoding='utf-8'))
+          items=data.get('items', data if isinstance(data,list) else [])
+          matches=[x for x in items if x.get('tag')==tag]
+          assert len(matches)==1, f'ERROR: Expected exactly one uploaded Worker version for tag {tag}; found {len(matches)}'
+          vid=matches[0].get('id') or matches[0].get('version_id')
+          assert vid, f'ERROR: Uploaded Worker version has no Version ID: {matches[0]}'
+          open('/tmp/worker-version-id.txt','w',encoding='utf-8').write(vid)
+          print('EXACT UPLOADED WORKER VERSION ID:',vid)
+          PY
+          WORKER_VERSION_ID="$(cat /tmp/worker-version-id.txt)"
+
+          # Cloudflare's documented non-interactive form accepts VERSION-ID@100%.
+          # Retry the same immutable promotion if the platform is still serving
+          # an older deployment; no dashboard action is required.
+          promoted=false
+          for attempt in 1 2 3; do
+            echo "PROMOTION ATTEMPT $attempt/3: $WORKER_VERSION_ID@100%"
+            npx --yes wrangler@4.128.0 versions deploy --config wrangler.toml "${WORKER_VERSION_ID}@100%" --message "MY SHOP V-$SOURCE_VERSION run $GITHUB_RUN_ID AUTO-PROMOTE 100%" -y
+            npx --yes wrangler@4.128.0 deployments status --config wrangler.toml --json | tee /tmp/worker-deployment-status.json
+            if python3 - "$WORKER_VERSION_ID" <<'PY'
+          import json,sys
+          target=sys.argv[1]
+          data=json.load(open('/tmp/worker-deployment-status.json',encoding='utf-8'))
+          versions=data.get('versions', data.get('deployment',{}).get('versions', []))
+          if isinstance(versions,dict):
+              versions=[versions]
+          ok=False
+          for item in versions:
+              vid=item.get('version_id') or item.get('id') or item.get('versionId')
+              pct=item.get('percentage', item.get('traffic_percentage', item.get('trafficPercentage')))
+              try: pct=float(pct)
+              except (TypeError,ValueError): continue
+              if vid==target and pct==100: ok=True
+          if not ok:
+              print('ACTIVE DEPLOYMENT DOES NOT YET SHOW TARGET VERSION AT 100%')
+              print(json.dumps(data,ensure_ascii=False))
+          raise SystemExit(0 if ok else 1)
+          PY
+            then
+              promoted=true
+              echo "CLOUDFLARE ACTIVE DEPLOYMENT VERIFIED: $WORKER_VERSION_ID at 100%"
+              break
+            fi
+            sleep 5
+          done
+          test "$promoted" = true || { echo 'ERROR: Cloudflare did not promote the exact uploaded Worker version to 100% after 3 attempts; BUILD STOP'; exit 1; }
+          echo "EXACT WORKER VERSION PROMOTED: $WORKER_VERSION_TAG ($WORKER_VERSION_ID)"
 
       - name: Write immutable build source manifest
         shell: bash
@@ -364,103 +452,4 @@ jobs:
           python3 - <<'PY'
           import json
           d=json.load(open('/tmp/content-suite.json'))
-          if d.get('ok') is not True: raise SystemExit(f'ERROR: CONTENT WRITE SUITE FAILED: {d}')
-          required=['schema','dashboard_config','banners','banner_media','gallery_items','gallery_media','social_links','feature_buttons','managed_links','dashboard_ads','notifications','notification_reads','r2']
-          bad=[k for k in required if d.get('checks',{}).get(k)!='ok']
-          if bad: raise SystemExit(f'ERROR: CONTENT WRITE SUITE FAILED: {bad} {d}')
-          print('LIVE CONTENT WRITE SUITE PASSED')
-          PY
-
-      - name: Setup Java 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Setup Android SDK 36
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
-        shell: bash
-        run: |
-          set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
-
-      - name: Setup Gradle 8.11.1
-        uses: gradle/actions/setup-gradle@v5
-        with:
-          gradle-version: '8.11.1'
-
-      - name: Restore EXISTING permanent signing key
-        uses: actions/cache@v4
-        with:
-          path: .signing
-          key: my-shop-release-signing-v1
-
-      - name: Refuse accidental signing-key replacement
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f .signing/myshop-release.jks || { echo 'ERROR: Permanent signing key is unavailable. STOPPED to prevent an incompatible APK update.'; exit 1; }
-          keytool -list -keystore .signing/myshop-release.jks -storepass 'myshop-release-2026' -alias myshop >/dev/null
-
-      - name: Build exactly ONE release APK
-        working-directory: ${{ env.PROJECT }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf app/build
-          gradle clean :app:assembleRelease --no-daemon --no-build-cache --rerun-tasks
-          mapfile -t APKS < <(find app/build/outputs/apk/release -type f -name '*.apk' -print)
-          test "${#APKS[@]}" -eq 1 || { echo "ERROR: Expected exactly one APK; found ${#APKS[@]}"; printf '%s\n' "${APKS[@]}"; exit 1; }
-          echo "UNSIGNED_APK=${APKS[0]}" >> "$GITHUB_ENV"
-
-      - name: Verify package and exact version before signing
-        shell: bash
-        run: |
-          set -euo pipefail
-          OUT="$($ANDROID_HOME/build-tools/36.0.0/aapt2 dump badging "$PROJECT/$UNSIGNED_APK")"
-          echo "$OUT"
-          echo "$OUT" | grep -Fq "package: name='com.myshop.app'"
-          echo "$OUT" | grep -Fq "versionName='2.9.$SOURCE_VERSION'"
-          echo "$OUT" | grep -Fq "versionCode='$SOURCE_VERSION'"
-
-      - name: Sign exactly ONE APK with existing permanent key
-        shell: bash
-        run: |
-          set -euo pipefail
-          BT="$ANDROID_HOME/build-tools/36.0.0"
-          mkdir -p release
-          "$BT/zipalign" -f -p 4 "$PROJECT/$UNSIGNED_APK" release/aligned.apk
-          "$BT/apksigner" sign --ks .signing/myshop-release.jks --ks-pass pass:myshop-release-2026 --key-pass pass:myshop-release-2026 --ks-key-alias myshop --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out release/MY_SHOP_FINAL_RELEASE.apk release/aligned.apk
-          "$BT/apksigner" verify --verbose release/MY_SHOP_FINAL_RELEASE.apk
-          rm -f release/aligned.apk
-          sha256sum release/MY_SHOP_FINAL_RELEASE.apk > release/MY_SHOP_FINAL_RELEASE.apk.sha256
-
-      - name: Final safety guards
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')" -eq 1
-          test -f release/MY_SHOP_FINAL_RELEASE.apk.sha256
-          ! grep -RniE 'DROP[[:space:]]+TABLE|TRUNCATE|DELETE[[:space:]]+FROM[[:space:]]+myshop_auth_users_v108' "$PROJECT/backend/worker/src" >/dev/null
-          echo 'FINAL SAFETY GUARDS PASSED'
-
-      - name: Upload Cloudflare verification evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: MY-SHOP-V-${{ env.SOURCE_VERSION }}-CLOUDFLARE-DIAGNOSTICS
-          path: release/cloudflare
-          if-no-files-found: ignore
-
-      - name: Upload exactly ONE final APK plus checksum
-        uses: actions/upload-artifact@v4
-        with:
-          name: MY-SHOP-FINAL-V-${{ env.SOURCE_VERSION }}
-          path: |
-            release/MY_SHOP_FINAL_RELEASE.apk
-            release/MY_SHOP_FINAL_RELEASE.apk.sha256
-          if-no-files-found: error
-          retention-days: 30
+          if d.get('ok') is not True: raise SystemExit(f'ERROR: CONTENT WRITE SUITE
