@@ -7,328 +7,184 @@ on:
     paths:
       - 'V-*.zip'
       - '.github/workflows/my-shop-apk.yml'
-
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: my-shop-main-release
+  cancel-in-progress: false
 
 env:
   MYSHOP_BACKEND_URL: https://rapid-bush-62ea.myshopsatkania.workers.dev
   WORKER_URL: https://rapid-bush-62ea.myshopsatkania.workers.dev
 
 jobs:
-
   build:
     name: MY SHOP FINAL APK
     runs-on: ubuntu-latest
 
     steps:
-
-      # =========================================================
-      # 1. CHECKOUT
-      # =========================================================
-
-      - name: Checkout repository
+      - name: Checkout LATEST main (stale re-run protection)
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
 
-
-      # =========================================================
-      # 2. BASIC MASTER WORKFLOW GUARD
-      # =========================================================
+      - name: Verify checkout is current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main --depth=1
+          LOCAL_SHA="$(git rev-parse HEAD)"
+          REMOTE_SHA="$(git rev-parse origin/main)"
+          echo "CHECKOUT_SHA=$LOCAL_SHA" >> "$GITHUB_ENV"
+          echo "TRIGGER_SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
+          echo "LOCAL MAIN : $LOCAL_SHA"
+          echo "REMOTE MAIN: $REMOTE_SHA"
+          echo "TRIGGER SHA: $GITHUB_SHA"
+          if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+            echo "ERROR: Checkout is not the latest main commit."
+            exit 1
+          fi
 
       - name: Master workflow safety guard
         shell: bash
         run: |
           set -euo pipefail
-
           test -f ".github/workflows/my-shop-apk.yml"
-
           echo "MASTER WORKFLOW FOUND"
-          echo "AUTO BUILD WORKFLOW ACTIVE"
+          echo "LATEST-MAIN BUILD MODE ACTIVE"
 
-
-      # =========================================================
-      # 3. SELECT HIGHEST V-NUMBER SOURCE ZIP
-      # =========================================================
-
-      - name: Select newest V-numbered source ZIP
+      - name: Select exactly one highest V-numbered source ZIP
         shell: bash
         run: |
           set -euo pipefail
+          shopt -s nullglob
+          FILES=(V-*.zip)
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "ERROR: No V-numbered source ZIP found in repository root."
+            exit 1
+          fi
 
-          BEST_FILE=""
           BEST_VERSION=-1
-
-          for FILE in V-*.zip; do
-            [ -f "$FILE" ] || continue
-
+          CANDIDATES=()
+          for FILE in "${FILES[@]}"; do
             NAME="$(basename "$FILE")"
-
             if [[ "$NAME" =~ ^V-([0-9]+)-.+\.zip$ ]]; then
               VERSION=$((10#${BASH_REMATCH[1]}))
-
               if [ "$VERSION" -gt "$BEST_VERSION" ]; then
                 BEST_VERSION="$VERSION"
-                BEST_FILE="$NAME"
+                CANDIDATES=("$NAME")
+              elif [ "$VERSION" -eq "$BEST_VERSION" ]; then
+                CANDIDATES+=("$NAME")
               fi
             fi
           done
 
-          if [ -z "$BEST_FILE" ]; then
-            echo "ERROR: No V-numbered source ZIP found."
-            exit 1
-          fi
-
           if [ "$BEST_VERSION" -lt 221 ]; then
-            echo "ERROR: Source version is too old: V-$BEST_VERSION"
+            echo "ERROR: Highest valid source is too old: V-$BEST_VERSION"
             exit 1
           fi
 
-          echo "SOURCE_ZIP=$BEST_FILE" >> "$GITHUB_ENV"
+          if [ "${#CANDIDATES[@]}" -ne 1 ]; then
+            echo "ERROR: More than one ZIP exists for highest version V-$BEST_VERSION."
+            printf '  %s\n' "${CANDIDATES[@]}"
+            echo "Keep exactly one ZIP for the newest V-number."
+            exit 1
+          fi
+
+          SOURCE_ZIP="${CANDIDATES[0]}"
+          echo "SOURCE_ZIP=$SOURCE_ZIP" >> "$GITHUB_ENV"
           echo "SOURCE_VERSION=$BEST_VERSION" >> "$GITHUB_ENV"
+          echo "SELECTED SOURCE: $SOURCE_ZIP"
+          echo "SELECTED VERSION: V-$BEST_VERSION"
 
-          echo "=========================================="
-          echo "SELECTED SOURCE"
-          echo "ZIP: $BEST_FILE"
-          echo "VERSION: V-$BEST_VERSION"
-          echo "=========================================="
-
-
-      # =========================================================
-      # 4. EXTRACT SOURCE
-      # =========================================================
-
-      - name: Extract exact source ZIP
+      - name: Extract and verify exact source identity
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf source
           mkdir -p source
-
           unzip -q "$SOURCE_ZIP" -d source
 
-          echo "SOURCE EXTRACTED"
-
-
-      # =========================================================
-      # 5. FIND SOURCE BUILD ID
-      # =========================================================
-
-      - name: Verify SOURCE_BUILD_ID
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          BUILD_ID_FILE="$(
-            find source \
-              -type f \
-              -name "SOURCE_BUILD_ID.txt" \
-              -print -quit
-          )"
-
-          if [ -z "$BUILD_ID_FILE" ]; then
-            echo "ERROR: SOURCE_BUILD_ID.txt not found."
-            exit 1
-          fi
-
-          echo "BUILD ID FILE: $BUILD_ID_FILE"
-
-          if ! grep -Fqx "MY SHOP V-$SOURCE_VERSION" "$BUILD_ID_FILE"; then
-            echo "ERROR: SOURCE_BUILD_ID mismatch."
-            echo "Expected: MY SHOP V-$SOURCE_VERSION"
-            echo "Actual:"
+          BUILD_ID_FILE="$(find source -type f -name SOURCE_BUILD_ID.txt -print -quit)"
+          test -n "$BUILD_ID_FILE" || { echo "ERROR: SOURCE_BUILD_ID.txt not found."; exit 1; }
+          grep -Fqx "MY SHOP V-$SOURCE_VERSION" "$BUILD_ID_FILE" || {
+            echo "ERROR: SOURCE_BUILD_ID mismatch. Expected MY SHOP V-$SOURCE_VERSION"
             cat "$BUILD_ID_FILE"
             exit 1
-          fi
-
+          }
           echo "SOURCE_BUILD_ID VERIFIED"
 
-
-      # =========================================================
-      # 6. LOCATE ANDROID PROJECT
-      # =========================================================
-
-      - name: Locate Android project
+      - name: Locate Android project and verify version
         shell: bash
         run: |
           set -euo pipefail
-
           PROJECT_DIR=""
-
           while IFS= read -r SETTINGS_FILE; do
-
             CANDIDATE="$(dirname "$SETTINGS_FILE")"
-
-            if find "$CANDIDATE" \
-              -maxdepth 5 \
-              -type f \
-              \( \
-                -path "*/app/build.gradle" \
-                -o \
-                -path "*/app/build.gradle.kts" \
-              \) \
-              -print -quit | grep -q .; then
-
+            if [ -f "$CANDIDATE/app/build.gradle" ] || [ -f "$CANDIDATE/app/build.gradle.kts" ]; then
               PROJECT_DIR="$CANDIDATE"
               break
-
             fi
+          done < <(find source -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print | sort)
 
-          done < <(
-            find source \
-              -type f \
-              \( \
-                -name "settings.gradle" \
-                -o \
-                -name "settings.gradle.kts" \
-              \) \
-              -print | sort
-          )
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Android project not found."
-            exit 1
-          fi
-
+          test -n "$PROJECT_DIR" || { echo "ERROR: Android project not found."; exit 1; }
           if [ -f "$PROJECT_DIR/app/build.gradle" ]; then
             APP_GRADLE="$PROJECT_DIR/app/build.gradle"
-          elif [ -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
-            APP_GRADLE="$PROJECT_DIR/app/build.gradle.kts"
           else
-            echo "ERROR: app Gradle file not found."
-            exit 1
+            APP_GRADLE="$PROJECT_DIR/app/build.gradle.kts"
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "APP_GRADLE=$APP_GRADLE" >> "$GITHUB_ENV"
 
-          echo "PROJECT: $PROJECT_DIR"
-          echo "APP GRADLE: $APP_GRADLE"
-
-
-      # =========================================================
-      # 7. VERIFY VERSION
-      # =========================================================
-
-      - name: Verify exact Android version
-        shell: bash
-        run: |
-          set -euo pipefail
-
           python3 - "$APP_GRADLE" "$SOURCE_VERSION" <<'PY'
-          import re
-          import sys
-
-          path = sys.argv[1]
-          version = int(sys.argv[2])
-
-          text = open(path, encoding="utf-8").read()
-
-          m = re.search(r'\bversionCode\s+(\d+)', text)
-
-          if not m:
-              raise SystemExit("ERROR: versionCode not found")
-
-          actual_code = int(m.group(1))
-
-          if actual_code != version:
-              raise SystemExit(
-                  f"ERROR: versionCode mismatch: "
-                  f"expected {version}, got {actual_code}"
-              )
-
-          m = re.search(
-              r'\bversionName\s+["\']([^"\']+)["\']',
-              text
-          )
-
-          if not m:
-              raise SystemExit("ERROR: versionName not found")
-
-          actual_name = m.group(1)
-          expected_name = f"2.9.{version}"
-
-          if actual_name != expected_name:
-              raise SystemExit(
-                  f"ERROR: versionName mismatch: "
-                  f"expected {expected_name}, got {actual_name}"
-              )
-
-          print("ANDROID VERSION VERIFIED")
-          print("versionCode =", actual_code)
-          print("versionName =", actual_name)
+          import re, sys
+          path, version = sys.argv[1], int(sys.argv[2])
+          text = open(path, encoding='utf-8').read()
+          m = re.search(r'\bversionCode\s*(?:=\s*)?(\d+)', text)
+          if not m or int(m.group(1)) != version:
+              raise SystemExit(f"ERROR: versionCode must equal {version}")
+          m = re.search(r'\bversionName\s*(?:=\s*)?["\']([^"\']+)["\']', text)
+          expected = f"2.9.{version}"
+          if not m or m.group(1) != expected:
+              raise SystemExit(f"ERROR: versionName must equal {expected}")
+          print(f"ANDROID VERSION VERIFIED: versionCode={version}, versionName={expected}")
           PY
-
-
-      # =========================================================
-      # 8. SOURCE PACKAGE MUST NOT MODIFY MASTER WORKFLOW
-      # =========================================================
 
       - name: Protect master workflow
         shell: bash
         run: |
           set -euo pipefail
-
-          if grep -RniE \
-            'git[[:space:]]+(push|commit).*workflow|git[[:space:]]+push[[:space:]]+origin' \
-            source \
-            --include="*.yml" \
-            --include="*.yaml"; then
-
+          if grep -RniE 'git[[:space:]]+(push|commit).*workflow|git[[:space:]]+push[[:space:]]+origin' source --include='*.yml' --include='*.yaml'; then
             echo "ERROR: Source package attempts to modify/push workflow."
             exit 1
           fi
-
           echo "MASTER WORKFLOW PROTECTION PASSED"
-
-
-      # =========================================================
-      # 9. JAVA
-      # =========================================================
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
-
-
-      # =========================================================
-      # 10. ANDROID SDK
-      # =========================================================
+          java-version: '17'
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-
 
       - name: Install Android SDK packages
         shell: bash
         run: |
           set -euo pipefail
-
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
-
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0"
-
-
-      # =========================================================
-      # 11. GRADLE
-      # =========================================================
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.11.1"
-
-
-      # =========================================================
-      # 12. RESTORE EXISTING PERMANENT SIGNING KEY
-      # =========================================================
+          gradle-version: '8.11.1'
 
       - name: Restore EXISTING permanent signing key
         uses: actions/cache@v4
@@ -336,102 +192,50 @@ jobs:
           path: .signing
           key: my-shop-release-signing-v1
 
-
-      # =========================================================
-      # 13. NEVER CREATE A NEW SIGNING KEY
-      # =========================================================
-
-      - name: Verify permanent signing key
+      - name: Verify permanent signing key and secrets BEFORE build
         shell: bash
+        env:
+          MYSHOP_KEYSTORE_PASSWORD: ${{ secrets.MYSHOP_KEYSTORE_PASSWORD }}
+          MYSHOP_KEY_ALIAS: ${{ secrets.MYSHOP_KEY_ALIAS }}
+          MYSHOP_KEY_PASSWORD: ${{ secrets.MYSHOP_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-
-          if [ ! -f ".signing/myshop-release.jks" ]; then
-            echo "ERROR: Permanent signing key unavailable."
-            echo "BUILD STOPPED."
-            echo "No new signing key will be created."
-            exit 1
-          fi
-
-          echo "PERMANENT SIGNING KEY FOUND"
-
-
-      # =========================================================
-      # 14. BUILD EXACTLY ONE RELEASE APK
-      # =========================================================
+          test -f .signing/myshop-release.jks || { echo "ERROR: Permanent signing key unavailable."; exit 1; }
+          test -n "${MYSHOP_KEYSTORE_PASSWORD:-}" || { echo "ERROR: MYSHOP_KEYSTORE_PASSWORD missing."; exit 1; }
+          test -n "${MYSHOP_KEY_ALIAS:-}" || { echo "ERROR: MYSHOP_KEY_ALIAS missing."; exit 1; }
+          test -n "${MYSHOP_KEY_PASSWORD:-}" || { echo "ERROR: MYSHOP_KEY_PASSWORD missing."; exit 1; }
+          keytool -list \
+            -keystore .signing/myshop-release.jks \
+            -storepass "$MYSHOP_KEYSTORE_PASSWORD" \
+            -alias "$MYSHOP_KEY_ALIAS" >/dev/null
+          echo "PERMANENT SIGNING KEY + SECRETS VERIFIED"
 
       - name: Build exactly ONE release APK
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf app/build
-
-          gradle \
-            clean \
-            :app:assembleRelease \
-            --no-daemon \
-            --no-build-cache \
-            --rerun-tasks
-
-          mapfile -t APKS < <(
-            find app/build/outputs/apk/release \
-              -type f \
-              -name "*.apk" \
-              -print
-          )
-
-          COUNT="${#APKS[@]}"
-
-          echo "RELEASE APK COUNT: $COUNT"
-
-          if [ "$COUNT" -ne 1 ]; then
-            echo "ERROR: Exactly one APK required."
+          gradle clean :app:assembleRelease --no-daemon --no-build-cache --rerun-tasks
+          mapfile -t APKS < <(find app/build/outputs/apk/release -type f -name '*.apk' -print)
+          if [ "${#APKS[@]}" -ne 1 ]; then
+            echo "ERROR: Exactly one release APK required; found ${#APKS[@]}."
             printf '%s\n' "${APKS[@]}"
             exit 1
           fi
-
           echo "UNSIGNED_APK=${APKS[0]}" >> "$GITHUB_ENV"
 
-          echo "ONE RELEASE APK CREATED"
-          echo "${APKS[0]}"
-
-
-      # =========================================================
-      # 15. VERIFY PACKAGE + VERSION
-      # =========================================================
-
-      - name: Verify APK package and version
+      - name: Verify unsigned APK package and version
         shell: bash
         run: |
           set -euo pipefail
-
           AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt2"
-
-          APK_PATH="$PROJECT_DIR/$UNSIGNED_APK"
-
-          OUT="$(
-            "$AAPT" dump badging "$APK_PATH"
-          )"
-
+          OUT="$($AAPT dump badging "$PROJECT_DIR/$UNSIGNED_APK")"
           echo "$OUT"
-
-          echo "$OUT" | grep -Fq \
-            "package: name='com.myshop.app'"
-
-          echo "$OUT" | grep -Fq \
-            "versionName='2.9.$SOURCE_VERSION'"
-
-          echo "$OUT" | grep -Fq \
-            "versionCode='$SOURCE_VERSION'"
-
-          echo "APK VERSION VERIFIED"
-
-
-      # =========================================================
-      # 16. SIGN APK WITH EXISTING PERMANENT KEY
-      # =========================================================
+          echo "$OUT" | grep -Fq "package: name='com.myshop.app'"
+          echo "$OUT" | grep -Fq "versionName='2.9.$SOURCE_VERSION'"
+          echo "$OUT" | grep -Fq "versionCode='$SOURCE_VERSION'"
+          echo "APK PACKAGE + VERSION VERIFIED"
 
       - name: Sign exactly ONE APK
         shell: bash
@@ -441,33 +245,10 @@ jobs:
           MYSHOP_KEY_PASSWORD: ${{ secrets.MYSHOP_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-
-          test -n "${MYSHOP_KEYSTORE_PASSWORD:-}" || {
-            echo "ERROR: MYSHOP_KEYSTORE_PASSWORD secret is missing."
-            exit 1
-          }
-
-          test -n "${MYSHOP_KEY_ALIAS:-}" || {
-            echo "ERROR: MYSHOP_KEY_ALIAS secret is missing."
-            exit 1
-          }
-
-          test -n "${MYSHOP_KEY_PASSWORD:-}" || {
-            echo "ERROR: MYSHOP_KEY_PASSWORD secret is missing."
-            exit 1
-          }
-
           BT="$ANDROID_HOME/build-tools/36.0.0"
-
+          rm -rf release
           mkdir -p release
-
-          "$BT/zipalign" \
-            -f \
-            -p \
-            4 \
-            "$PROJECT_DIR/$UNSIGNED_APK" \
-            release/aligned.apk
-
+          "$BT/zipalign" -f -p 4 "$PROJECT_DIR/$UNSIGNED_APK" release/aligned.apk
           "$BT/apksigner" sign \
             --ks .signing/myshop-release.jks \
             --ks-pass "env:MYSHOP_KEYSTORE_PASSWORD" \
@@ -478,85 +259,33 @@ jobs:
             --v3-signing-enabled true \
             --out release/MY_SHOP_FINAL_RELEASE.apk \
             release/aligned.apk
-
-          "$BT/apksigner" verify \
-            --verbose \
-            release/MY_SHOP_FINAL_RELEASE.apk
-
           rm -f release/aligned.apk
+          "$BT/apksigner" verify --verbose release/MY_SHOP_FINAL_RELEASE.apk
+          "$BT/zipalign" -c -v 4 release/MY_SHOP_FINAL_RELEASE.apk
+          sha256sum release/MY_SHOP_FINAL_RELEASE.apk > release/MY_SHOP_FINAL_RELEASE.apk.sha256
 
-          sha256sum \
-            release/MY_SHOP_FINAL_RELEASE.apk \
-            > release/MY_SHOP_FINAL_RELEASE.apk.sha256
-
-          echo "FINAL APK SIGNED"
-
-
-      # =========================================================
-      # 17. FINAL ONE-APK GUARD
-      # =========================================================
-
-      - name: Final safety guards
+      - name: Final one-APK and source guards
         shell: bash
         run: |
           set -euo pipefail
+          COUNT="$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')"
+          test "$COUNT" -eq 1 || { echo "ERROR: Final APK count is $COUNT"; exit 1; }
+          test -f release/MY_SHOP_FINAL_RELEASE.apk
+          test -f release/MY_SHOP_FINAL_RELEASE.apk.sha256
 
-          COUNT="$(
-            find release \
-              -maxdepth 1 \
-              -type f \
-              -name "*.apk" \
-              | wc -l \
-              | tr -d " "
-          )"
-
-          if [ "$COUNT" -ne 1 ]; then
-            echo "ERROR: Final APK count is $COUNT"
-            exit 1
-          fi
-
-          test -f \
-            release/MY_SHOP_FINAL_RELEASE.apk
-
-          test -f \
-            release/MY_SHOP_FINAL_RELEASE.apk.sha256
-
-          echo "=========================================="
-          echo "FINAL SAFETY CHECK PASSED"
-          echo "APK COUNT: 1"
-          echo "APK: MY_SHOP_FINAL_RELEASE.apk"
-          echo "VERSION: V-$SOURCE_VERSION"
-          echo "=========================================="
-
-
-      # =========================================================
-      # 18. BUILD SOURCE MANIFEST
-      # =========================================================
-
-      - name: Write build source manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p release
-
-          SHA="$(
-            sha256sum "$SOURCE_ZIP" \
-            | awk '{print $1}'
-          )"
-
+          SOURCE_SHA="$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')"
           {
-            echo "V-$SOURCE_VERSION"
-            echo "$SOURCE_ZIP"
-            echo "$SHA"
+            echo "SOURCE_VERSION=V-$SOURCE_VERSION"
+            echo "SOURCE_ZIP=$SOURCE_ZIP"
+            echo "SOURCE_ZIP_SHA256=$SOURCE_SHA"
+            echo "CHECKOUT_SHA=$CHECKOUT_SHA"
+            echo "TRIGGER_SHA=$TRIGGER_SHA"
           } > release/BUILD_SOURCE_ID.txt
 
-          echo "SOURCE MANIFEST CREATED"
-
-
-      # =========================================================
-      # 19. UPLOAD EXACTLY ONE FINAL APK
-      # =========================================================
+          echo "FINAL SAFETY CHECK PASSED"
+          echo "APK: MY_SHOP_FINAL_RELEASE.apk"
+          echo "VERSION: V-$SOURCE_VERSION"
+          echo "SOURCE: $SOURCE_ZIP"
 
       - name: Upload exactly ONE final APK
         uses: actions/upload-artifact@v4
