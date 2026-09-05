@@ -1,4 +1,4 @@
-name: MY SHOP STABLE PERMANENT MASTER V-224
+name: MY SHOP STABLE PERMANENT MASTER V-225
 
 on:
   push:
@@ -391,19 +391,69 @@ jobs:
           test -n "$WORKER_VERSION_ID"
 
           # Cloudflare's documented non-interactive form accepts VERSION-ID@100%.
-          # Retry the same immutable promotion if the platform is still serving
-          # an older deployment; no dashboard action is required.
+          # V-224 proved that deployment metadata can report 100% while the public
+          # Worker endpoint is still serving the previous version. V-225 therefore
+          # treats the REAL /health response as the final promotion authority.
+          # It redeploys the same immutable Version ID and polls the live endpoint
+          # with cache-busting headers until the exact V-number is actually served.
           promoted=false
-          for attempt in 1 2 3; do
-            echo "PROMOTION ATTEMPT $attempt/3: $WORKER_VERSION_ID@100%"
+          for attempt in 1 2 3 4 5; do
+            echo "PROMOTION ATTEMPT $attempt/5: $WORKER_VERSION_ID@100%"
             WRANGLER_OUTPUT_FILE_PATH=/tmp/wrangler-deploy.ndjson \
-              npx --yes wrangler@4.128.0 versions deploy --config wrangler.toml "${WORKER_VERSION_ID}@100%" --message "MY SHOP V-$SOURCE_VERSION run $GITHUB_RUN_ID AUTO-PROMOTE 100%" -y
-            npx --yes wrangler@4.128.0 deployments status --config wrangler.toml --json > /tmp/worker-deployment-status.raw
-            if python3 - "$WORKER_VERSION_ID" <<'PY'
+              npx --yes wrangler@4.128.0 versions deploy --config wrangler.toml "${WORKER_VERSION_ID}@100%" --message "MY SHOP V-$SOURCE_VERSION run $GITHUB_RUN_ID ACTIVE-VERIFY-PROMOTE 100%" -y
+
+            npx --yes wrangler@4.128.0 deployments status --config wrangler.toml --json > /tmp/worker-deployment-status.raw || true
+
+            LIVE_OK=false
+            for live_try in $(seq 1 20); do
+              LIVE_STATUS="$(curl --silent --show-error --output /tmp/live-health.json --write-out '%{http_code}' \
+                -H 'Cache-Control: no-cache, no-store, max-age=0' \
+                -H 'Pragma: no-cache' \
+                "$WORKER_URL/health?deploy_check=${GITHUB_RUN_ID}-${attempt}-${live_try}-$(date +%s%N)" || true)"
+
+              if [ "$LIVE_STATUS" = "200" ]; then
+                if python3 - "$SOURCE_VERSION" <<'PY'
+          import json,sys
+          v=int(sys.argv[1])
+          try:
+              h=json.load(open('/tmp/live-health.json',encoding='utf-8'))
+          except Exception:
+              raise SystemExit(1)
+          ok=(h.get('ok') is True and h.get('version')==f'2.9.{v}' and h.get('build')==f'V-{v}')
+          if ok:
+              print('LIVE PRODUCTION VERSION VERIFIED:',f'V-{v}')
+          raise SystemExit(0 if ok else 1)
+          PY
+                then
+                  LIVE_OK=true
+                  break
+                fi
+              fi
+              echo "LIVE endpoint still serves an older/unverified Worker (HTTP $LIVE_STATUS); waiting 3s..."
+              sleep 3
+            done
+
+            if [ "$LIVE_OK" = true ]; then
+              promoted=true
+              cp /tmp/live-health.json /tmp/promoted-health.json
+              echo "CLOUDFLARE LIVE ENDPOINT VERIFIED: exact source V-$SOURCE_VERSION is active"
+              break
+            fi
+            echo "PROMOTION ATTEMPT $attempt did not reach the live endpoint; redeploying the SAME immutable Version ID."
+            sleep 5
+          done
+          test "$promoted" = true || { echo 'ERROR: Exact uploaded Worker Version ID was not observed on the live /health endpoint after 5 promotion attempts; BUILD STOP'; exit 1; }
+
+          # Deployment metadata is supporting evidence only. The live endpoint above
+          # is the release-blocking proof that production really switched versions.
+          python3 - "$WORKER_VERSION_ID" <<'PY'
           import json,sys,re
           target=sys.argv[1]
           raw=open('/tmp/worker-deployment-status.raw',encoding='utf-8',errors='replace').read()
           raw=re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', raw)
+          if not raw.strip():
+              print('WARNING: Deployment status output was empty; live endpoint already verified exact version.')
+              raise SystemExit(0)
           decoder=json.JSONDecoder()
           data=None
           for i,ch in enumerate(raw):
@@ -415,8 +465,8 @@ jobs:
               except json.JSONDecodeError:
                   continue
           if data is None:
-              print('ERROR: Wrangler deployment status did not contain a valid JSON payload')
-              raise SystemExit(1)
+              print('WARNING: Deployment status JSON could not be parsed; live endpoint already verified exact version.')
+              raise SystemExit(0)
           def walk(obj):
               if isinstance(obj,dict):
                   yield obj
@@ -425,29 +475,16 @@ jobs:
               elif isinstance(obj,list):
                   for value in obj:
                       yield from walk(value)
-          ok=False
+          found=False
           for item in walk(data):
               vid=item.get('version_id') or item.get('id') or item.get('versionId')
-              pct=item.get('percentage', item.get('traffic_percentage', item.get('trafficPercentage')))
-              try: pct=float(pct)
-              except (TypeError,ValueError): continue
-              if vid==target and pct==100:
-                  ok=True
+              if vid==target:
+                  found=True
                   break
-          if not ok:
-              print('ACTIVE DEPLOYMENT DOES NOT YET SHOW TARGET VERSION AT 100%')
-              print(json.dumps(data,ensure_ascii=False))
-          raise SystemExit(0 if ok else 1)
+          print('DEPLOYMENT STATUS CONTAINS TARGET VERSION:',found)
+          raise SystemExit(0)
           PY
-            then
-              promoted=true
-              echo "CLOUDFLARE ACTIVE DEPLOYMENT VERIFIED: $WORKER_VERSION_ID at 100%"
-              break
-            fi
-            sleep 5
-          done
-          test "$promoted" = true || { echo 'ERROR: Cloudflare did not promote the exact uploaded Worker version to 100% after 3 attempts; BUILD STOP'; exit 1; }
-          echo "EXACT WORKER VERSION PROMOTED: $WORKER_VERSION_TAG ($WORKER_VERSION_ID)"
+          echo "EXACT WORKER VERSION LIVE: $WORKER_VERSION_TAG ($WORKER_VERSION_ID)"
 
       - name: Write immutable build source manifest
         shell: bash
@@ -476,7 +513,12 @@ jobs:
             cat "$out" || true
             return 1
           }
-          probe "$WORKER_URL/health" /tmp/health.json
+          LIVE_HEALTH_URL="$WORKER_URL/health?release_check=${GITHUB_RUN_ID}-$(date +%s%N)"
+          status="$(curl --silent --show-error --output /tmp/health.json --write-out '%{http_code}' \
+            -H 'Cache-Control: no-cache, no-store, max-age=0' \
+            -H 'Pragma: no-cache' \
+            "$LIVE_HEALTH_URL" || true)"
+          test "$status" = "200" || { echo "ERROR: Active Worker /health returned HTTP $status"; cat /tmp/health.json || true; exit 1; }
           cp /tmp/health.json release/cloudflare/health.json
           probe "$WORKER_URL/health/deep" /tmp/deep.json
           cp /tmp/deep.json release/cloudflare/deep-health.json
