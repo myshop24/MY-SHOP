@@ -12,7 +12,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -25,15 +24,12 @@ jobs:
           BEST_VERSION=0
 
           for FILE in V-*.zip; do
-            if [ ! -f "$FILE" ]; then
-              continue
-            fi
+            [ -f "$FILE" ] || continue
 
             NAME="$(basename "$FILE")"
 
             if [[ "$NAME" =~ ^V-([0-9]+)-.*\.zip$ ]]; then
-              VERSION="${BASH_REMATCH[1]}"
-              VERSION=$((10#$VERSION))
+              VERSION=$((10#${BASH_REMATCH[1]}))
 
               if [ "$VERSION" -gt "$BEST_VERSION" ]; then
                 BEST_VERSION="$VERSION"
@@ -73,25 +69,136 @@ jobs:
         run: |
           set -e
 
-          GRADLEW_FILE="$(find source -type f -name gradlew -print -quit)"
+          PROJECT_DIR=""
 
-          if [ -z "$GRADLEW_FILE" ]; then
-            echo "ERROR: gradlew not found."
-            exit 1
+          # First try to find a settings file whose project contains
+          # an Android app Gradle file.
+          while IFS= read -r SETTINGS_FILE; do
+
+            CANDIDATE="$(dirname "$SETTINGS_FILE")"
+
+            if find "$CANDIDATE" \
+              -maxdepth 5 \
+              -type f \
+              \( \
+                -path '*/app/build.gradle' \
+                -o \
+                -path '*/app/build.gradle.kts' \
+              \) \
+              -print -quit | grep -q .; then
+
+              PROJECT_DIR="$CANDIDATE"
+              break
+
+            fi
+
+          done < <(
+            find source \
+              -type f \
+              \( \
+                -name settings.gradle \
+                -o \
+                -name settings.gradle.kts \
+              \) \
+              -print | sort
+          )
+
+          # Fallback: if gradlew exists, use its directory.
+          if [ -z "$PROJECT_DIR" ]; then
+
+            GRADLEW_FILE="$(
+              find source \
+                -type f \
+                -name gradlew \
+                -print -quit
+            )"
+
+            if [ -n "$GRADLEW_FILE" ]; then
+
+              CANDIDATE="$(dirname "$GRADLEW_FILE")"
+
+              if find "$CANDIDATE" \
+                -maxdepth 5 \
+                -type f \
+                \( \
+                  -path '*/app/build.gradle' \
+                  -o \
+                  -path '*/app/build.gradle.kts' \
+                \) \
+                -print -quit | grep -q .; then
+
+                PROJECT_DIR="$CANDIDATE"
+
+              fi
+
+            fi
+
           fi
 
-          PROJECT_DIR="$(dirname "$GRADLEW_FILE")"
+          if [ -z "$PROJECT_DIR" ]; then
 
-          if [ ! -f "$PROJECT_DIR/settings.gradle" ] && [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
-            echo "ERROR: Android settings file not found."
+            echo "ERROR: Android project not found."
+
+            echo "Gradle/settings files found:"
+
+            find source \
+              -type f \
+              \( \
+                -name settings.gradle \
+                -o \
+                -name settings.gradle.kts \
+                -o \
+                -name build.gradle \
+                -o \
+                -name build.gradle.kts \
+                -o \
+                -name gradlew \
+              \) \
+              -print | head -200 || true
+
+            exit 1
+
+          fi
+
+          APP_GRADLE=""
+
+          if [ -f "$PROJECT_DIR/app/build.gradle" ]; then
+
+            APP_GRADLE="$PROJECT_DIR/app/build.gradle"
+
+          elif [ -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
+
+            APP_GRADLE="$PROJECT_DIR/app/build.gradle.kts"
+
+          else
+
+            APP_GRADLE="$(
+              find "$PROJECT_DIR" \
+                -maxdepth 5 \
+                -type f \
+                \( \
+                  -path '*/app/build.gradle' \
+                  -o \
+                  -path '*/app/build.gradle.kts' \
+                \) \
+                -print -quit
+            )"
+
+          fi
+
+          if [ -z "$APP_GRADLE" ]; then
+            echo "ERROR: app/build.gradle or app/build.gradle.kts not found."
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "APP_GRADLE=$APP_GRADLE" >> "$GITHUB_ENV"
 
           echo "================================"
           echo "ANDROID PROJECT"
           echo "$PROJECT_DIR"
+          echo "APP GRADLE"
+          echo "$APP_GRADLE"
           echo "================================"
 
       - name: Create permanent source build ID
@@ -137,53 +244,68 @@ jobs:
         run: |
           set -e
 
-          GROOVY="$PROJECT_DIR/app/build.gradle"
-          KOTLIN="$PROJECT_DIR/app/build.gradle.kts"
-
-          if [ -f "$GROOVY" ]; then
-
-            sed -i -E \
-              "s/versionCode[[:space:]]+[0-9]+/versionCode $SOURCE_V/g" \
-              "$GROOVY"
-
-            sed -i -E \
-              "s/versionName[[:space:]]+['\"][^'\"]+['\"]/versionName \"2.9.$SOURCE_V\"/g" \
-              "$GROOVY"
-
-            echo "Updated Groovy Gradle file."
-
-          elif [ -f "$KOTLIN" ]; then
-
-            sed -i -E \
-              "s/versionCode[[:space:]]*=[[:space:]]*[0-9]+/versionCode = $SOURCE_V/g" \
-              "$KOTLIN"
-
-            sed -i -E \
-              "s/versionName[[:space:]]*=[[:space:]]*['\"][^'\"]+['\"]/versionName = \"2.9.$SOURCE_V\"/g" \
-              "$KOTLIN"
-
-            echo "Updated Kotlin Gradle file."
-
-          else
-            echo "ERROR: app Gradle file not found."
-            exit 1
-          fi
-
-      - name: Verify version before build
-        shell: bash
-        run: |
-          set -e
-
-          echo "Expected versionCode:"
-          echo "$SOURCE_V"
-
-          echo "Expected versionName:"
-          echo "2.9.$SOURCE_V"
-
           if [ "$SOURCE_V" -le 0 ]; then
             echo "ERROR: Invalid V-number."
             exit 1
           fi
+
+          if grep -Eq \
+            'versionCode[[:space:]]+[0-9]+' \
+            "$APP_GRADLE"; then
+
+            sed -i -E \
+              "s/versionCode[[:space:]]+[0-9]+/versionCode $SOURCE_V/g" \
+              "$APP_GRADLE"
+
+          elif grep -Eq \
+            'versionCode[[:space:]]*=[[:space:]]*[0-9]+' \
+            "$APP_GRADLE"; then
+
+            sed -i -E \
+              "s/versionCode[[:space:]]*=[[:space:]]*[0-9]+/versionCode = $SOURCE_V/g" \
+              "$APP_GRADLE"
+
+          else
+
+            echo "WARNING: Literal versionCode was not found."
+            echo "Project versionCode expression will be preserved."
+
+          fi
+
+          if grep -Eq \
+            'versionName[[:space:]]+['"'"'][^'"'"']+['"'"']' \
+            "$APP_GRADLE"; then
+
+            sed -i -E \
+              "s/versionName[[:space:]]+['\"][^'\"]+['\"]/versionName \"2.9.$SOURCE_V\"/g" \
+              "$APP_GRADLE"
+
+          elif grep -Eq \
+            'versionName[[:space:]]*=[[:space:]]*['"'"'][^'"'"']+['"'"']' \
+            "$APP_GRADLE"; then
+
+            sed -i -E \
+              "s/versionName[[:space:]]*=[[:space:]]*['\"][^'\"]+['\"]/versionName = \"2.9.$SOURCE_V\"/g" \
+              "$APP_GRADLE"
+
+          else
+
+            echo "WARNING: Literal versionName was not found."
+            echo "Project versionName expression will be preserved."
+
+          fi
+
+          echo "================================"
+          echo "VERSION CHECK"
+          echo "Expected V: $SOURCE_V"
+          echo "Expected Version Name: 2.9.$SOURCE_V"
+          echo "Gradle file: $APP_GRADLE"
+          echo "================================"
+
+          grep -nE \
+            'versionCode|versionName' \
+            "$APP_GRADLE" \
+            | head -20 || true
 
       - name: Prepare Gradle
         shell: bash
@@ -192,18 +314,66 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          chmod +x gradlew
+          if [ -f "./gradlew" ]; then
 
-          ./gradlew --version
+            echo "Existing Gradle wrapper found."
+
+            chmod +x ./gradlew
+
+            echo "GRADLE_CMD=$PROJECT_DIR/gradlew" \
+              >> "$GITHUB_ENV"
+
+            ./gradlew --version
+
+          else
+
+            echo "================================"
+            echo "No gradlew found in source ZIP."
+            echo "Bootstrapping Gradle 8.13."
+            echo "================================"
+
+            GRADLE_HOME="$RUNNER_TEMP/gradle-8.13"
+
+            if [ ! -x "$GRADLE_HOME/bin/gradle" ]; then
+
+              curl -fsSL \
+                -o "$RUNNER_TEMP/gradle.zip" \
+                https://services.gradle.org/distributions/gradle-8.13-bin.zip
+
+              rm -rf \
+                "$GRADLE_HOME" \
+                "$RUNNER_TEMP/gradle-8.13-extract"
+
+              mkdir -p \
+                "$RUNNER_TEMP/gradle-8.13-extract"
+
+              unzip -q \
+                "$RUNNER_TEMP/gradle.zip" \
+                -d "$RUNNER_TEMP/gradle-8.13-extract"
+
+              mv \
+                "$RUNNER_TEMP/gradle-8.13-extract/gradle-8.13" \
+                "$GRADLE_HOME"
+
+            fi
+
+            echo "GRADLE_CMD=$GRADLE_HOME/bin/gradle" \
+              >> "$GITHUB_ENV"
+
+            "$GRADLE_HOME/bin/gradle" --version
+
+          fi
 
       - name: Clean previous APK output
         shell: bash
         run: |
           set -e
 
-          rm -rf "$PROJECT_DIR/app/build/outputs/apk"
+          rm -rf \
+            "$PROJECT_DIR/app/build/outputs/apk"
 
-          mkdir -p "$PROJECT_DIR/app/build/outputs/apk"
+          mkdir -p \
+            "$PROJECT_DIR/app/build/outputs/apk"
 
       - name: Build release APK
         shell: bash
@@ -212,7 +382,9 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          ./gradlew clean assembleRelease \
+          "$GRADLE_CMD" \
+            clean \
+            assembleRelease \
             --no-daemon \
             --stacktrace
 
@@ -223,32 +395,33 @@ jobs:
 
           APK_LIST="$RUNNER_TEMP/apk-list.txt"
 
-          find "$PROJECT_DIR/app/build/outputs/apk" \
+          find \
+            "$PROJECT_DIR/app/build/outputs/apk" \
             -type f \
-            -name "*.apk" \
-            ! -name "*-unsigned.apk" \
-            -print > "$APK_LIST"
+            -name '*.apk' \
+            ! -name '*-unsigned.apk' \
+            -print \
+            > "$APK_LIST"
 
           APK_COUNT="$(wc -l < "$APK_LIST")"
 
           echo "Release APK count: $APK_COUNT"
 
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "ERROR: No signed release APK found."
+          if [ "$APK_COUNT" -ne 1 ]; then
 
-            find "$PROJECT_DIR/app/build/outputs" \
+            echo "ERROR: Expected exactly one signed release APK."
+
+            cat "$APK_LIST" || true
+
+            echo "All APK/output files:"
+
+            find \
+              "$PROJECT_DIR/app/build/outputs" \
               -type f \
               -print || true
 
             exit 1
-          fi
 
-          if [ "$APK_COUNT" -ne 1 ]; then
-            echo "ERROR: More than one APK found."
-
-            cat "$APK_LIST"
-
-            exit 1
           fi
 
           APK_FILE="$(cat "$APK_LIST")"
@@ -258,7 +431,8 @@ jobs:
 
           mkdir -p release
 
-          cp "$APK_FILE" \
+          cp \
+            "$APK_FILE" \
             release/MY_SHOP_FINAL_RELEASE.apk
 
       - name: Verify final APK
