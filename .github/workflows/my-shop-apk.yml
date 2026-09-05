@@ -1,99 +1,302 @@
-name: MY SHOP - BUILD APK
+name: MY SHOP - PERMANENT FINAL RELEASE
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
+    name: MY SHOP FINAL APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find V ZIP
+      - name: Select highest V source ZIP
+        shell: bash
         run: |
           set -e
-          ZIP=$(find . -maxdepth 1 -type f -name 'V-*.zip' | sort | tail -n 1)
 
-          if [ -z "$ZIP" ]; then
-            echo "ERROR: No V-*.zip file found."
+          BEST_FILE=""
+          BEST_VERSION=0
+
+          for FILE in V-*.zip; do
+            if [ ! -f "$FILE" ]; then
+              continue
+            fi
+
+            NAME="$(basename "$FILE")"
+
+            if [[ "$NAME" =~ ^V-([0-9]+)-.*\.zip$ ]]; then
+              VERSION="${BASH_REMATCH[1]}"
+              VERSION=$((10#$VERSION))
+
+              if [ "$VERSION" -gt "$BEST_VERSION" ]; then
+                BEST_VERSION="$VERSION"
+                BEST_FILE="$NAME"
+              fi
+            fi
+          done
+
+          if [ -z "$BEST_FILE" ]; then
+            echo "ERROR: No V-numbered source ZIP found."
             exit 1
           fi
 
-          echo "Using ZIP: $ZIP"
-          echo "SOURCE_ZIP=$ZIP" >> "$GITHUB_ENV"
+          echo "SOURCE_ZIP=$BEST_FILE" >> "$GITHUB_ENV"
+          echo "SOURCE_V=$BEST_VERSION" >> "$GITHUB_ENV"
 
-      - name: Extract project
+          echo "================================"
+          echo "SELECTED SOURCE"
+          echo "ZIP: $BEST_FILE"
+          echo "VERSION: V-$BEST_VERSION"
+          echo "================================"
+
+      - name: Extract source ZIP
+        shell: bash
         run: |
           set -e
+
           rm -rf source
-          mkdir source
+          mkdir -p source
+
           unzip -q "$SOURCE_ZIP" -d source
 
-      - name: Find Gradle project
+          echo "Source extracted successfully."
+
+      - name: Locate Android project
+        shell: bash
         run: |
           set -e
 
-          SETTINGS=$(find source -type f -name 'settings.gradle' -print -quit)
+          GRADLEW_FILE="$(find source -type f -name gradlew -print -quit)"
 
-          if [ -z "$SETTINGS" ]; then
-            echo "ERROR: settings.gradle not found."
-            exit 1
-          fi
-
-          PROJECT=$(dirname "$SETTINGS")
-
-          if [ ! -f "$PROJECT/gradlew" ]; then
+          if [ -z "$GRADLEW_FILE" ]; then
             echo "ERROR: gradlew not found."
             exit 1
           fi
 
-          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
-          echo "Project: $PROJECT"
+          PROJECT_DIR="$(dirname "$GRADLEW_FILE")"
 
-      - name: Setup Java
+          if [ ! -f "$PROJECT_DIR/settings.gradle" ] && [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
+            echo "ERROR: Android settings file not found."
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "================================"
+          echo "ANDROID PROJECT"
+          echo "$PROJECT_DIR"
+          echo "================================"
+
+      - name: Create permanent source build ID
+        shell: bash
+        run: |
+          set -e
+
+          printf 'V-%s\n' "$SOURCE_V" \
+            > "$PROJECT_DIR/SOURCE_BUILD_ID.txt"
+
+          printf '2.9.%s\n' "$SOURCE_V" \
+            > "$PROJECT_DIR/SOURCE_VERSION_NAME.txt"
+
+          echo "SOURCE_BUILD_ID:"
+          cat "$PROJECT_DIR/SOURCE_BUILD_ID.txt"
+
+          echo "SOURCE_VERSION_NAME:"
+          cat "$PROJECT_DIR/SOURCE_VERSION_NAME.txt"
+
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install SDK
-        run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
-
-      - name: Build APK
-        run: |
-          set -e
-          cd "$PROJECT"
-          chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace
-
-      - name: Collect APK
+      - name: Install Android SDK
+        shell: bash
         run: |
           set -e
 
-          mkdir -p release-apk
+          yes | sdkmanager --licenses >/dev/null || true
 
-          APK=$(find "$PROJECT/app/build/outputs/apk" \
-            -type f \
-            -name '*.apk' \
-            ! -name '*-unsigned.apk' \
-            | head -n 1)
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
 
-          if [ -z "$APK" ]; then
-            echo "ERROR: APK was not created."
+      - name: Apply permanent app version
+        shell: bash
+        run: |
+          set -e
+
+          GROOVY="$PROJECT_DIR/app/build.gradle"
+          KOTLIN="$PROJECT_DIR/app/build.gradle.kts"
+
+          if [ -f "$GROOVY" ]; then
+
+            sed -i -E \
+              "s/versionCode[[:space:]]+[0-9]+/versionCode $SOURCE_V/g" \
+              "$GROOVY"
+
+            sed -i -E \
+              "s/versionName[[:space:]]+['\"][^'\"]+['\"]/versionName \"2.9.$SOURCE_V\"/g" \
+              "$GROOVY"
+
+            echo "Updated Groovy Gradle file."
+
+          elif [ -f "$KOTLIN" ]; then
+
+            sed -i -E \
+              "s/versionCode[[:space:]]*=[[:space:]]*[0-9]+/versionCode = $SOURCE_V/g" \
+              "$KOTLIN"
+
+            sed -i -E \
+              "s/versionName[[:space:]]*=[[:space:]]*['\"][^'\"]+['\"]/versionName = \"2.9.$SOURCE_V\"/g" \
+              "$KOTLIN"
+
+            echo "Updated Kotlin Gradle file."
+
+          else
+            echo "ERROR: app Gradle file not found."
             exit 1
           fi
 
-          cp "$APK" release-apk/MY-SHOP-release.apk
+      - name: Verify version before build
+        shell: bash
+        run: |
+          set -e
 
-      - name: Upload APK
+          echo "Expected versionCode:"
+          echo "$SOURCE_V"
+
+          echo "Expected versionName:"
+          echo "2.9.$SOURCE_V"
+
+          if [ "$SOURCE_V" -le 0 ]; then
+            echo "ERROR: Invalid V-number."
+            exit 1
+          fi
+
+      - name: Prepare Gradle
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          chmod +x gradlew
+
+          ./gradlew --version
+
+      - name: Clean previous APK output
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf "$PROJECT_DIR/app/build/outputs/apk"
+
+          mkdir -p "$PROJECT_DIR/app/build/outputs/apk"
+
+      - name: Build release APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          ./gradlew clean assembleRelease \
+            --no-daemon \
+            --stacktrace
+
+      - name: Verify exactly one APK
+        shell: bash
+        run: |
+          set -e
+
+          APK_LIST="$RUNNER_TEMP/apk-list.txt"
+
+          find "$PROJECT_DIR/app/build/outputs/apk" \
+            -type f \
+            -name "*.apk" \
+            ! -name "*-unsigned.apk" \
+            -print > "$APK_LIST"
+
+          APK_COUNT="$(wc -l < "$APK_LIST")"
+
+          echo "Release APK count: $APK_COUNT"
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "ERROR: No signed release APK found."
+
+            find "$PROJECT_DIR/app/build/outputs" \
+              -type f \
+              -print || true
+
+            exit 1
+          fi
+
+          if [ "$APK_COUNT" -ne 1 ]; then
+            echo "ERROR: More than one APK found."
+
+            cat "$APK_LIST"
+
+            exit 1
+          fi
+
+          APK_FILE="$(cat "$APK_LIST")"
+
+          echo "Final source APK:"
+          echo "$APK_FILE"
+
+          mkdir -p release
+
+          cp "$APK_FILE" \
+            release/MY_SHOP_FINAL_RELEASE.apk
+
+      - name: Verify final APK
+        shell: bash
+        run: |
+          set -e
+
+          FINAL_APK="release/MY_SHOP_FINAL_RELEASE.apk"
+
+          if [ ! -f "$FINAL_APK" ]; then
+            echo "ERROR: Final APK does not exist."
+            exit 1
+          fi
+
+          if [ ! -s "$FINAL_APK" ]; then
+            echo "ERROR: Final APK is empty."
+            exit 1
+          fi
+
+          SIZE="$(stat -c%s "$FINAL_APK")"
+
+          if [ "$SIZE" -le 10000 ]; then
+            echo "ERROR: APK is too small."
+            exit 1
+          fi
+
+          echo "================================"
+          echo "FINAL APK VERIFIED"
+          echo "File: $FINAL_APK"
+          echo "Size: $SIZE bytes"
+          echo "V: $SOURCE_V"
+          echo "Version Name: 2.9.$SOURCE_V"
+          echo "================================"
+
+      - name: Upload exactly one final APK
         uses: actions/upload-artifact@v4
         with:
-          name: MY-SHOP-APK
-          path: release-apk/MY-SHOP-release.apk
+          name: MY-SHOP-FINAL-V-${{ env.SOURCE_V }}
+          path: release/MY_SHOP_FINAL_RELEASE.apk
+          if-no-files-found: error
+          retention-days: 14
