@@ -71,10 +71,7 @@ jobs:
 
           PROJECT_DIR=""
 
-          # First try to find a settings file whose project contains
-          # an Android app Gradle file.
           while IFS= read -r SETTINGS_FILE; do
-
             CANDIDATE="$(dirname "$SETTINGS_FILE")"
 
             if find "$CANDIDATE" \
@@ -89,7 +86,6 @@ jobs:
 
               PROJECT_DIR="$CANDIDATE"
               break
-
             fi
 
           done < <(
@@ -103,7 +99,6 @@ jobs:
               -print | sort
           )
 
-          # Fallback: if gradlew exists, use its directory.
           if [ -z "$PROJECT_DIR" ]; then
 
             GRADLEW_FILE="$(
@@ -114,7 +109,6 @@ jobs:
             )"
 
             if [ -n "$GRADLEW_FILE" ]; then
-
               CANDIDATE="$(dirname "$GRADLEW_FILE")"
 
               if find "$CANDIDATE" \
@@ -128,18 +122,13 @@ jobs:
                 -print -quit | grep -q .; then
 
                 PROJECT_DIR="$CANDIDATE"
-
               fi
-
             fi
-
           fi
 
           if [ -z "$PROJECT_DIR" ]; then
-
             echo "ERROR: Android project not found."
-
-            echo "Gradle/settings files found:"
+            echo "Available Gradle/project files:"
 
             find source \
               -type f \
@@ -157,21 +146,17 @@ jobs:
               -print | head -200 || true
 
             exit 1
-
           fi
 
           APP_GRADLE=""
 
           if [ -f "$PROJECT_DIR/app/build.gradle" ]; then
-
             APP_GRADLE="$PROJECT_DIR/app/build.gradle"
 
           elif [ -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
-
             APP_GRADLE="$PROJECT_DIR/app/build.gradle.kts"
 
           else
-
             APP_GRADLE="$(
               find "$PROJECT_DIR" \
                 -maxdepth 5 \
@@ -183,7 +168,6 @@ jobs:
                 \) \
                 -print -quit
             )"
-
           fi
 
           if [ -z "$APP_GRADLE" ]; then
@@ -266,10 +250,7 @@ jobs:
               "$APP_GRADLE"
 
           else
-
             echo "WARNING: Literal versionCode was not found."
-            echo "Project versionCode expression will be preserved."
-
           fi
 
           if grep -Eq \
@@ -289,17 +270,13 @@ jobs:
               "$APP_GRADLE"
 
           else
-
             echo "WARNING: Literal versionName was not found."
-            echo "Project versionName expression will be preserved."
-
           fi
 
           echo "================================"
           echo "VERSION CHECK"
           echo "Expected V: $SOURCE_V"
           echo "Expected Version Name: 2.9.$SOURCE_V"
-          echo "Gradle file: $APP_GRADLE"
           echo "================================"
 
           grep -nE \
@@ -354,14 +331,12 @@ jobs:
               mv \
                 "$RUNNER_TEMP/gradle-8.13-extract/gradle-8.13" \
                 "$GRADLE_HOME"
-
             fi
 
             echo "GRADLE_CMD=$GRADLE_HOME/bin/gradle" \
               >> "$GITHUB_ENV"
 
             "$GRADLE_HOME/bin/gradle" --version
-
           fi
 
       - name: Clean previous APK output
@@ -408,7 +383,6 @@ jobs:
           echo "Release APK count: $APK_COUNT"
 
           if [ "$APK_COUNT" -ne 1 ]; then
-
             echo "ERROR: Expected exactly one signed release APK."
 
             cat "$APK_LIST" || true
@@ -421,7 +395,6 @@ jobs:
               -print || true
 
             exit 1
-
           fi
 
           APK_FILE="$(cat "$APK_LIST")"
