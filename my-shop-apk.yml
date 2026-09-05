@@ -1,0 +1,253 @@
+name: MY SHOP - PERMANENT FINAL RELEASE
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: MY SHOP FINAL APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select highest V source ZIP
+        shell: bash
+        run: |
+          set -e
+          BEST_FILE=""
+          BEST_VERSION=0
+
+          for FILE in V-*.zip; do
+            [ -f "$FILE" ] || continue
+            NAME="$(basename "$FILE")"
+
+            if [[ "$NAME" =~ ^V-([0-9]+)-.*\.zip$ ]]; then
+              VERSION=$((10#${BASH_REMATCH[1]}))
+              if [ "$VERSION" -gt "$BEST_VERSION" ]; then
+                BEST_VERSION="$VERSION"
+                BEST_FILE="$NAME"
+              fi
+            fi
+          done
+
+          [ -n "$BEST_FILE" ] || { echo "ERROR: No V-numbered source ZIP found."; exit 1; }
+
+          echo "SOURCE_ZIP=$BEST_FILE" >> "$GITHUB_ENV"
+          echo "SOURCE_V=$BEST_VERSION" >> "$GITHUB_ENV"
+          echo "Selected: $BEST_FILE (V-$BEST_VERSION)"
+
+      - name: Extract source ZIP
+        shell: bash
+        run: |
+          set -e
+          rm -rf source
+          mkdir -p source
+          unzip -q "$SOURCE_ZIP" -d source
+
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -e
+          PROJECT_DIR=""
+
+          while IFS= read -r SETTINGS_FILE; do
+            CANDIDATE="$(dirname "$SETTINGS_FILE")"
+            if find "$CANDIDATE" -maxdepth 5 -type f \
+              \( -path '*/app/build.gradle' -o -path '*/app/build.gradle.kts' \) \
+              -print -quit | grep -q .; then
+              PROJECT_DIR="$CANDIDATE"
+              break
+            fi
+          done < <(find source -type f \
+            \( -name settings.gradle -o -name settings.gradle.kts \) \
+            -print | sort)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android project not found."
+            find source -type f \
+              \( -name settings.gradle -o -name settings.gradle.kts \
+                 -o -name build.gradle -o -name build.gradle.kts -o -name gradlew \) \
+              -print | head -200 || true
+            exit 1
+          fi
+
+          if [ -f "$PROJECT_DIR/app/build.gradle" ]; then
+            APP_GRADLE="$PROJECT_DIR/app/build.gradle"
+          elif [ -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
+            APP_GRADLE="$PROJECT_DIR/app/build.gradle.kts"
+          else
+            echo "ERROR: app Gradle file not found."
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "APP_GRADLE=$APP_GRADLE" >> "$GITHUB_ENV"
+          echo "PROJECT_DIR=$PROJECT_DIR"
+          echo "APP_GRADLE=$APP_GRADLE"
+
+      - name: Create permanent source build ID
+        shell: bash
+        run: |
+          set -e
+          printf 'V-%s\n' "$SOURCE_V" > "$PROJECT_DIR/SOURCE_BUILD_ID.txt"
+          printf '2.9.%s\n' "$SOURCE_V" > "$PROJECT_DIR/SOURCE_VERSION_NAME.txt"
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -e
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Apply permanent app version
+        shell: bash
+        run: |
+          set -e
+
+          if grep -Eq 'versionCode[[:space:]]+[0-9]+' "$APP_GRADLE"; then
+            sed -i -E "s/versionCode[[:space:]]+[0-9]+/versionCode $SOURCE_V/g" "$APP_GRADLE"
+          elif grep -Eq 'versionCode[[:space:]]*=[[:space:]]*[0-9]+' "$APP_GRADLE"; then
+            sed -i -E "s/versionCode[[:space:]]*=[[:space:]]*[0-9]+/versionCode = $SOURCE_V/g" "$APP_GRADLE"
+          fi
+
+          sed -i -E \
+            "s/versionName[[:space:]]+[\"'][^\"']+[\"']/versionName \"2.9.$SOURCE_V\"/g" \
+            "$APP_GRADLE" || true
+
+          sed -i -E \
+            "s/versionName[[:space:]]*=[[:space:]]*[\"'][^\"']+[\"']/versionName = \"2.9.$SOURCE_V\"/g" \
+            "$APP_GRADLE" || true
+
+          grep -nE 'versionCode|versionName' "$APP_GRADLE" | head -20 || true
+
+      - name: Prepare Gradle
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            echo "GRADLE_CMD=$PROJECT_DIR/gradlew" >> "$GITHUB_ENV"
+            ./gradlew --version
+          else
+            GRADLE_HOME="$RUNNER_TEMP/gradle-8.13"
+
+            curl -fsSL \
+              -o "$RUNNER_TEMP/gradle.zip" \
+              https://services.gradle.org/distributions/gradle-8.13-bin.zip
+
+            rm -rf "$GRADLE_HOME" "$RUNNER_TEMP/gradle-extract"
+            mkdir -p "$RUNNER_TEMP/gradle-extract"
+
+            unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP/gradle-extract"
+            mv "$RUNNER_TEMP/gradle-extract/gradle-8.13" "$GRADLE_HOME"
+
+            echo "GRADLE_CMD=$GRADLE_HOME/bin/gradle" >> "$GITHUB_ENV"
+            "$GRADLE_HOME/bin/gradle" --version
+          fi
+
+      - name: Detect release signing configuration
+        shell: bash
+        run: |
+          set -e
+
+          SIGNING_FILE=""
+
+          for F in \
+            "$PROJECT_DIR/keystore.properties" \
+            "$PROJECT_DIR/signing.properties" \
+            "$PROJECT_DIR/app/keystore.properties" \
+            "$PROJECT_DIR/app/signing.properties"; do
+            if [ -f "$F" ]; then
+              SIGNING_FILE="$F"
+              break
+            fi
+          done
+
+          if [ -n "$SIGNING_FILE" ]; then
+            echo "Existing signing properties found: $SIGNING_FILE"
+            echo "SIGNING_FILE=$SIGNING_FILE" >> "$GITHUB_ENV"
+          else
+            echo "No signing properties file found in source."
+          fi
+
+      - name: Clean APK output
+        shell: bash
+        run: |
+          set -e
+          rm -rf "$PROJECT_DIR/app/build/outputs/apk"
+          mkdir -p "$PROJECT_DIR/app/build/outputs/apk"
+
+      - name: Build release APK
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          "$GRADLE_CMD" clean assembleRelease --no-daemon --stacktrace
+
+      - name: Verify exactly one signed APK
+        shell: bash
+        run: |
+          set -e
+
+          APK_LIST="$RUNNER_TEMP/apk-list.txt"
+
+          find "$PROJECT_DIR/app/build/outputs/apk" \
+            -type f -name '*.apk' \
+            ! -name '*-unsigned.apk' \
+            -print > "$APK_LIST"
+
+          APK_COUNT="$(wc -l < "$APK_LIST")"
+          echo "Signed release APK count: $APK_COUNT"
+
+          if [ "$APK_COUNT" -ne 1 ]; then
+            echo "ERROR: Exactly one SIGNED APK is required."
+            echo "All APK files:"
+            find "$PROJECT_DIR/app/build/outputs" -type f -name '*.apk' -print || true
+            exit 1
+          fi
+
+          APK_FILE="$(cat "$APK_LIST")"
+          mkdir -p release
+          cp "$APK_FILE" release/MY_SHOP_FINAL_RELEASE.apk
+
+      - name: Verify final APK
+        shell: bash
+        run: |
+          set -e
+
+          FINAL_APK="release/MY_SHOP_FINAL_RELEASE.apk"
+
+          [ -s "$FINAL_APK" ] || { echo "ERROR: Final APK missing or empty."; exit 1; }
+
+          SIZE="$(stat -c%s "$FINAL_APK")"
+          [ "$SIZE" -gt 10000 ] || { echo "ERROR: APK too small."; exit 1; }
+
+          echo "FINAL APK VERIFIED"
+          echo "File: $FINAL_APK"
+          echo "Size: $SIZE bytes"
+          echo "V: $SOURCE_V"
+          echo "Version: 2.9.$SOURCE_V"
+
+      - name: Upload exactly one final APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MY-SHOP-FINAL-V-${{ env.SOURCE_V }}
+          path: release/MY_SHOP_FINAL_RELEASE.apk
+          if-no-files-found: error
+          retention-days: 14
