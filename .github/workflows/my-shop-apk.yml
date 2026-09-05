@@ -70,7 +70,7 @@ jobs:
 
             if (( N > BEST_VERSION )) || \
                (( N == BEST_VERSION && T > BEST_TIME )) || \
-               (( N == BEST_VERSION && T == BEST_TIME && FILE > BEST_NAME )); then
+               { (( N == BEST_VERSION && T == BEST_TIME )) && [[ "$FILE" > "$BEST_NAME" ]]; }; then
               BEST_VERSION="$N"
               BEST_NAME="$FILE"
               BEST_TIME="$T"
@@ -109,22 +109,9 @@ jobs:
           APP_GRADLE="$(find "$ROOT_SOURCE/app" -maxdepth 1 -type f -name 'build.gradle*' -print -quit)"
           python3 - "$APP_GRADLE" "$SOURCE_VERSION" <<'PY'
           import re,sys
-          p,ver=sys.argv[1],int(sys.argv[2])
-          s=open(p,encoding='utf-8').read()
-          code=re.search(r'\bversionCode\s+(\d+)',s)
-          name=re.search(r"\bversionName\s+['\"]([^'\"]+)['\"]",s)
-          if not code:
-              raise SystemExit('ERROR: Source app/build.gradle has no versionCode; BUILD STOP')
-          if not name:
-              raise SystemExit('ERROR: Source app/build.gradle has no versionName; BUILD STOP')
-          old_code=int(code.group(1))
-          old_name=name.group(1)
-          expected_name=f'2.9.{ver}'
-          if old_code != ver or old_name != expected_name:
-              print(f'WARNING: Source metadata is stale: versionCode={old_code}, versionName={old_name}; expected V-{ver} / {expected_name}.')
-              print('The permanent version-lock step will normalize these values before Gradle build.')
-          else:
-              print(f'Source package version metadata already matches V-{ver}.')
+          p,ver=sys.argv[1],int(sys.argv[2]); s=open(p,encoding='utf-8').read()
+          m=re.search(r'\bversionCode\s+(\d+)',s); assert m and int(m.group(1))==ver, 'ERROR: Source versionCode mismatch; BUILD STOP'
+          m=re.search(r"\bversionName\s+['\"]([^'\"]+)['\"]",s); assert m and m.group(1)==f'2.9.{ver}', 'ERROR: Source versionName mismatch; BUILD STOP'
           PY
           echo "SOURCE_ROOT=$ROOT_SOURCE" >> "$GITHUB_ENV"
 
@@ -152,7 +139,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SETTINGS="$(find source -type f -name settings.gradle -o -name settings.gradle.kts -print -quit)"
+          SETTINGS="$(find source -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)"
           test -n "$SETTINGS" || { echo 'ERROR: Android settings file not found.'; exit 1; }
           PROJECT="$(dirname "$SETTINGS")"
           test -f "$PROJECT/app/build.gradle" || test -f "$PROJECT/app/build.gradle.kts" || { echo 'ERROR: app Gradle file not found.'; exit 1; }
@@ -176,6 +163,7 @@ jobs:
           s=s[:m.end()]+'\n'+field+s[m.end():]
           open(path,'w',encoding='utf-8').write(s)
           PY
+
           python3 - "$PROJECT/backend/worker/src/index.js" "$SOURCE_VERSION" <<'PY'
           import re,sys
           path,ver=sys.argv[1],int(sys.argv[2])
@@ -184,6 +172,7 @@ jobs:
           assert n==1,'Worker /health version marker not found'
           open(path,'w',encoding='utf-8').write(s)
           PY
+
           TOML="$PROJECT/backend/worker/wrangler.toml"
           grep -Fq 'name = "rapid-bush-62ea"' "$TOML"
           grep -Fq 'database_name = "my-shop-db"' "$TOML"
@@ -472,4 +461,6 @@ jobs:
           name: MY-SHOP-FINAL-V-${{ env.SOURCE_VERSION }}
           path: |
             release/MY_SHOP_FINAL_RELEASE.apk
-            release/MY_SHOP_FINAL
+            release/MY_SHOP_FINAL_RELEASE.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
