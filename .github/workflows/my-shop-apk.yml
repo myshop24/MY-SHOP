@@ -1,4 +1,4 @@
-name: MY SHOP STABLE PERMANENT MASTER V-223
+name: MY SHOP STABLE PERMANENT MASTER V-224
 
 on:
   push:
@@ -312,47 +312,45 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Create the code version and carry the required health-probe secret
-          # in the SAME version. `wrangler secret put` creates/deploys a new
-          # version and can fail when the latest code version is not deployed.
-          # `versions upload --secrets-file` is the supported gradual-deploy path.
+          # Permanent deployment rule: upload the exact verified source and its
+          # secret together, capture the Version ID directly from Wrangler's
+          # structured ND-JSON output, then promote that immutable ID to 100%.
+          # We deliberately do NOT call `versions list` to discover the new version:
+          # Cloudflare documents that Version tags in `versions list` are optional.
           WORKER_VERSION_TAG="my-shop-v-${SOURCE_VERSION}-run-${GITHUB_RUN_ID}"
-          WRANGLER_OUTPUT_FILE_PATH=/tmp/wrangler-output.ndjson
+          WRANGLER_OUTPUT_FILE_PATH=/tmp/wrangler-upload.ndjson
           export WRANGLER_OUTPUT_FILE_PATH
-          rm -f "$WRANGLER_OUTPUT_FILE_PATH" /tmp/worker-deployment-status.json /tmp/worker-version-id.txt
+          rm -f "$WRANGLER_OUTPUT_FILE_PATH" /tmp/worker-version-id.txt /tmp/worker-deployment-status.raw
+
           python3 - <<'PY'
           import json,os
           with open('/tmp/myshop-secrets.json','w',encoding='utf-8') as f:
               json.dump({'MYSHOP_HEALTH_PROBE_KEY': os.environ['MYSHOP_HEALTH_PROBE_KEY']}, f)
           PY
+
           npx --yes wrangler@4.128.0 versions upload --config wrangler.toml --tag "$WORKER_VERSION_TAG" --message "MY SHOP V-$SOURCE_VERSION run $GITHUB_RUN_ID" --secrets-file /tmp/myshop-secrets.json
           rm -f /tmp/myshop-secrets.json
 
-          # Never deploy by tag alone: resolve the exact uploaded Version ID and
-          # promote that immutable ID to 100%. This prevents an older/split
-          # deployment from silently remaining active.
-          # Wrangler can print non-JSON warnings before its --json payload.
-          # Capture stdout and extract the first valid JSON document instead of
-          # assuming byte 0 is always `{` or `[`. This prevents JSONDecodeError
-          # when Wrangler reports a configuration warning before the payload.
-          npx --yes wrangler@4.128.0 versions list --config wrangler.toml --json > /tmp/worker-versions.raw
-          python3 - "$WORKER_VERSION_TAG" <<'PY'
-          import json,sys,re
-          tag=sys.argv[1]
-          raw=open('/tmp/worker-versions.raw',encoding='utf-8',errors='replace').read()
+          # WRANGLER_OUTPUT_FILE_PATH is documented as ND-JSON. Read every JSON
+          # line recursively and accept only a unique Worker Version ID. This is
+          # independent of optional tags, list ordering, warning text, or payload shape.
+          python3 <<'PY'
+          import json,re,sys,uuid
+          path='/tmp/wrangler-upload.ndjson'
+          raw=open(path,encoding='utf-8',errors='replace').read()
           raw=re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', raw)
-          decoder=json.JSONDecoder()
-          data=None
-          for i,ch in enumerate(raw):
-              if ch not in '[{':
+          records=[]
+          for line in raw.splitlines():
+              line=line.strip()
+              if not line:
                   continue
               try:
-                  data,_=decoder.raw_decode(raw[i:])
-                  break
+                  records.append(json.loads(line))
               except json.JSONDecodeError:
                   continue
-          if data is None:
-              raise SystemExit('ERROR: Wrangler versions list did not contain a valid JSON payload')
+          if not records:
+              raise SystemExit('ERROR: Wrangler structured output is empty or invalid')
+
           def walk(obj):
               if isinstance(obj,dict):
                   yield obj
@@ -361,14 +359,36 @@ jobs:
               elif isinstance(obj,list):
                   for value in obj:
                       yield from walk(value)
-          matches=[x for x in walk(data) if x.get('tag')==tag and (x.get('id') or x.get('version_id'))]
-          assert len(matches)==1, f'ERROR: Expected exactly one uploaded Worker version for tag {tag}; found {len(matches)}'
-          vid=matches[0].get('id') or matches[0].get('version_id')
-          assert vid, f'ERROR: Uploaded Worker version has no Version ID: {matches[0]}'
+
+          ids=[]
+          for record in records:
+              for item in walk(record):
+                  for key in ('version_id','versionId'):
+                      value=item.get(key) if isinstance(item,dict) else None
+                      if isinstance(value,str):
+                          try:
+                              uuid.UUID(value)
+                          except ValueError:
+                              continue
+                          ids.append(value)
+
+          unique=[]
+          for value in ids:
+              if value not in unique:
+                  unique.append(value)
+
+          if len(unique)!=1:
+              print('WRANGLER STRUCTURED OUTPUT:')
+              print(raw)
+              raise SystemExit(f'ERROR: Expected exactly one uploaded Worker Version ID in Wrangler structured output; found {len(unique)}: {unique}')
+
+          vid=unique[0]
           open('/tmp/worker-version-id.txt','w',encoding='utf-8').write(vid)
           print('EXACT UPLOADED WORKER VERSION ID:',vid)
           PY
+
           WORKER_VERSION_ID="$(cat /tmp/worker-version-id.txt)"
+          test -n "$WORKER_VERSION_ID"
 
           # Cloudflare's documented non-interactive form accepts VERSION-ID@100%.
           # Retry the same immutable promotion if the platform is still serving
@@ -376,7 +396,8 @@ jobs:
           promoted=false
           for attempt in 1 2 3; do
             echo "PROMOTION ATTEMPT $attempt/3: $WORKER_VERSION_ID@100%"
-            npx --yes wrangler@4.128.0 versions deploy --config wrangler.toml "${WORKER_VERSION_ID}@100%" --message "MY SHOP V-$SOURCE_VERSION run $GITHUB_RUN_ID AUTO-PROMOTE 100%" -y
+            WRANGLER_OUTPUT_FILE_PATH=/tmp/wrangler-deploy.ndjson \
+              npx --yes wrangler@4.128.0 versions deploy --config wrangler.toml "${WORKER_VERSION_ID}@100%" --message "MY SHOP V-$SOURCE_VERSION run $GITHUB_RUN_ID AUTO-PROMOTE 100%" -y
             npx --yes wrangler@4.128.0 deployments status --config wrangler.toml --json > /tmp/worker-deployment-status.raw
             if python3 - "$WORKER_VERSION_ID" <<'PY'
           import json,sys,re
@@ -567,4 +588,23 @@ jobs:
           set -euo pipefail
           test "$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')" -eq 1
           test -f release/MY_SHOP_FINAL_RELEASE.apk.sha256
-          ! grep -Rni
+          ! grep -RniE 'DROP[[:space:]]+TABLE|TRUNCATE|DELETE[[:space:]]+FROM[[:space:]]+myshop_auth_users_v108' "$PROJECT/backend/worker/src" >/dev/null
+          echo 'FINAL SAFETY GUARDS PASSED'
+
+      - name: Upload Cloudflare verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MY-SHOP-V-${{ env.SOURCE_VERSION }}-CLOUDFLARE-DIAGNOSTICS
+          path: release/cloudflare
+          if-no-files-found: ignore
+
+      - name: Upload exactly ONE final APK plus checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: MY-SHOP-FINAL-V-${{ env.SOURCE_VERSION }}
+          path: |
+            release/MY_SHOP_FINAL_RELEASE.apk
+            release/MY_SHOP_FINAL_RELEASE.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
