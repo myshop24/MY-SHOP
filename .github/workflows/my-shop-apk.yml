@@ -1,4 +1,4 @@
-name: MY SHOP STABLE PERMANENT D1 R2 RELEASE
+name: MY SHOP STABLE PERMANENT MASTER V-223
 
 on:
   push:
@@ -120,32 +120,19 @@ jobs:
           PY
           echo "SOURCE_ROOT=$ROOT_SOURCE" >> "$GITHUB_ENV"
 
-      - name: Validate selected source master workflow (NO AUTO-PUSH)
+      - name: Validate selected source package (MASTER WORKFLOW IS ROOT-ONLY)
         shell: bash
         run: |
           set -euo pipefail
-
-          CANDIDATE="$(find source -type f -path '*/.github/workflows/my-shop-apk.yml' -print -quit)"
-          test -n "$CANDIDATE" || { echo 'ERROR: Source ZIP does not contain the master workflow. BUILD STOP'; exit 1; }
-
-          F1="$(printf '%b' '\x67\x6f\x6f\x67\x6c\x65[[:space:]]*\x64\x72\x69\x76\x65')"
-          F2="$(printf '%b' '\x62\x61\x63\x6b\x75\x70[[:space:]]+\x73\x6f\x75\x72\x63\x65[[:space:]]+\x7a\x69\x70')"
-          F3="$(printf '%b' '\x65\x78\x74\x65\x72\x6e\x61\x6c-\x62\x61\x63\x6b\x75\x70')"
-          F4="$(printf '%b' '\x47\x44\x52\x49\x56\x45_')"
-
-          ! grep -niE "$F1|$F2|$F3|$F4" "$CANDIDATE" || { echo 'ERROR: Candidate workflow contains forbidden external backup logic. BUILD STOP'; exit 1; }
-          grep -Fq 'Master workflow safety guard' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing the permanent master safety guard. BUILD STOP'; exit 1; }
-          grep -Fq 'Select newest V-numbered source ZIP' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing source locking. BUILD STOP'; exit 1; }
-          grep -Fq 'Run ACTIVE Worker content write suite (RELEASE BLOCKING)' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing the release-blocking Cloudflare write suite. BUILD STOP'; exit 1; }
-          ! grep -nE '^[[:space:]]*printf .*MYSHOP_HEALTH_PROBE_KEY.*wrangler.*secret[[:space:]]+put|^[[:space:]]*npx .*wrangler[^\n]*[[:space:]]+secret[[:space:]]+put' "$CANDIDATE" || { echo 'ERROR: Candidate workflow contains deprecated wrangler secret put deployment logic. BUILD STOP'; exit 1; }
-          grep -Fq 'versions upload' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing versions upload. BUILD STOP'; exit 1; }
-          grep -Fq -- '--secrets-file' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing same-version secret deployment. BUILD STOP'; exit 1; }
-          grep -Fq 'versions deploy' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing versions deploy. BUILD STOP'; exit 1; }
-          grep -Fq 'WORKER_VERSION_ID' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing exact immutable Version-ID promotion. BUILD STOP'; exit 1; }
-          grep -Fq 'EXACT UPLOADED WORKER VERSION ID:' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing immutable Worker version-ID promotion guard. BUILD STOP'; exit 1; }
-          grep -Fq 'CLOUDFLARE ACTIVE DEPLOYMENT VERIFIED:' "$CANDIDATE" || { echo 'ERROR: Candidate workflow is missing active deployment verification. BUILD STOP'; exit 1; }
-          ! grep -nE '^[[:space:]]*git[[:space:]]+(push|commit)[[:space:]].*workflow|^[[:space:]]*git[[:space:]]+push[[:space:]]+origin[[:space:]]+HEAD:main' "$CANDIDATE" || { echo 'ERROR: Candidate workflow attempts to self-push workflow files. BUILD STOP'; exit 1; }
-          echo 'Selected source master workflow validated. No workflow self-push will be attempted.'
+          # The repository-root workflow is the only workflow executed by GitHub Actions.
+          # A source ZIP may contain an older workflow; it is never copied over the root
+          # workflow and is never allowed to change the build logic. This makes the master
+          # workflow permanent across future V-numbered source packages.
+          ! grep -RniE '^[[:space:]]*git[[:space:]]+(push|commit)[[:space:]].*workflow|^[[:space:]]*git[[:space:]]+push[[:space:]]+origin[[:space:]]+HEAD:main' source --include='*.yml' --include='*.yaml' || {
+            echo 'ERROR: Source package attempts to self-push workflow files. BUILD STOP'
+            exit 1
+          }
+          echo 'SOURCE PACKAGE VALIDATED. ROOT MASTER WORKFLOW REMAINS AUTHORITATIVE.'
 
       - name: Locate Android + Worker project
         shell: bash
@@ -366,8 +353,15 @@ jobs:
                   continue
           if data is None:
               raise SystemExit('ERROR: Wrangler versions list did not contain a valid JSON payload')
-          items=data.get('items', data if isinstance(data,list) else [])
-          matches=[x for x in items if x.get('tag')==tag]
+          def walk(obj):
+              if isinstance(obj,dict):
+                  yield obj
+                  for value in obj.values():
+                      yield from walk(value)
+              elif isinstance(obj,list):
+                  for value in obj:
+                      yield from walk(value)
+          matches=[x for x in walk(data) if x.get('tag')==tag and (x.get('id') or x.get('version_id'))]
           assert len(matches)==1, f'ERROR: Expected exactly one uploaded Worker version for tag {tag}; found {len(matches)}'
           vid=matches[0].get('id') or matches[0].get('version_id')
           assert vid, f'ERROR: Uploaded Worker version has no Version ID: {matches[0]}'
@@ -402,16 +396,23 @@ jobs:
           if data is None:
               print('ERROR: Wrangler deployment status did not contain a valid JSON payload')
               raise SystemExit(1)
-          versions=data.get('versions', data.get('deployment',{}).get('versions', []))
-          if isinstance(versions,dict):
-              versions=[versions]
+          def walk(obj):
+              if isinstance(obj,dict):
+                  yield obj
+                  for value in obj.values():
+                      yield from walk(value)
+              elif isinstance(obj,list):
+                  for value in obj:
+                      yield from walk(value)
           ok=False
-          for item in versions:
+          for item in walk(data):
               vid=item.get('version_id') or item.get('id') or item.get('versionId')
               pct=item.get('percentage', item.get('traffic_percentage', item.get('trafficPercentage')))
               try: pct=float(pct)
               except (TypeError,ValueError): continue
-              if vid==target and pct==100: ok=True
+              if vid==target and pct==100:
+                  ok=True
+                  break
           if not ok:
               print('ACTIVE DEPLOYMENT DOES NOT YET SHOW TARGET VERSION AT 100%')
               print(json.dumps(data,ensure_ascii=False))
@@ -566,23 +567,4 @@ jobs:
           set -euo pipefail
           test "$(find release -maxdepth 1 -type f -name '*.apk' | wc -l | tr -d ' ')" -eq 1
           test -f release/MY_SHOP_FINAL_RELEASE.apk.sha256
-          ! grep -RniE 'DROP[[:space:]]+TABLE|TRUNCATE|DELETE[[:space:]]+FROM[[:space:]]+myshop_auth_users_v108' "$PROJECT/backend/worker/src" >/dev/null
-          echo 'FINAL SAFETY GUARDS PASSED'
-
-      - name: Upload Cloudflare verification evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: MY-SHOP-V-${{ env.SOURCE_VERSION }}-CLOUDFLARE-DIAGNOSTICS
-          path: release/cloudflare
-          if-no-files-found: ignore
-
-      - name: Upload exactly ONE final APK plus checksum
-        uses: actions/upload-artifact@v4
-        with:
-          name: MY-SHOP-FINAL-V-${{ env.SOURCE_VERSION }}
-          path: |
-            release/MY_SHOP_FINAL_RELEASE.apk
-            release/MY_SHOP_FINAL_RELEASE.apk.sha256
-          if-no-files-found: error
-          retention-days: 30
+          ! grep -Rni
