@@ -60,6 +60,9 @@ jobs:
             exit 1
           }
 
+          # Old V files are allowed to remain. Only the highest V is eligible.
+          # If the highest V exists more than once, choose the most recently
+          # committed/uploaded file; never fail merely because an older copy remains.
           BEST_VERSION=-1
           BEST_NAME=''
           BEST_TIME=-1
@@ -266,6 +269,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Inside anonymous Android callbacks, `this` is the callback object, not the Activity.
+          # Catch the known failure pattern before Gradle compilation so future builds fail early
+          # with a clear message instead of the cryptic Intent constructor error.
           if grep -RFn --include='*.java' 'new Intent(this,FeatureActivity.class)' "$PROJECT/app/src/main/java"; then
             echo 'ERROR: Unsafe FeatureActivity Intent context found. Use FeatureActivity.this.'
             exit 1
@@ -276,6 +282,8 @@ jobs:
           fi
           grep -Fq 'new Intent(FeatureActivity.this,FeatureActivity.class)' "$PROJECT/app/src/main/java/com/myshop/app/FeatureActivity.java"
           echo 'JAVA CONTEXT-SAFETY GUARD PASSED'
+          # Legacy-D1 compatibility: mutable content writes must not rely on a UNIQUE
+          # constraint that may not exist in an older database created before V-171.
           ! grep -Fq 'INSERT INTO banner_media(folder,slot,object_key,updated_at) VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(folder,slot)' "$PROJECT/backend/worker/src/index.js"
           ! grep -Fq 'INSERT INTO social_links(platform,url,icon_key,active) VALUES(?,?,?,?) ON CONFLICT(platform)' "$PROJECT/backend/worker/src/index.js"
           echo 'LEGACY-D1 WRITE COMPATIBILITY GUARD PASSED'
@@ -317,6 +325,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Create the code version and carry the required health-probe secret
+          # in the SAME version. `wrangler secret put` creates/deploys a new
+          # version and can fail when the latest code version is not deployed.
+          # `versions upload --secrets-file` is the supported gradual-deploy path.
           WORKER_VERSION_TAG="my-shop-v-${SOURCE_VERSION}-run-${GITHUB_RUN_ID}"
           WRANGLER_OUTPUT_FILE_PATH=/tmp/wrangler-output.ndjson
           export WRANGLER_OUTPUT_FILE_PATH
@@ -329,11 +341,31 @@ jobs:
           npx --yes wrangler@4.128.0 versions upload --config wrangler.toml --tag "$WORKER_VERSION_TAG" --message "MY SHOP V-$SOURCE_VERSION run $GITHUB_RUN_ID" --secrets-file /tmp/myshop-secrets.json
           rm -f /tmp/myshop-secrets.json
 
-          npx --yes wrangler@4.128.0 versions list --config wrangler.toml --json > /tmp/worker-versions.json
+          # Never deploy by tag alone: resolve the exact uploaded Version ID and
+          # promote that immutable ID to 100%. This prevents an older/split
+          # deployment from silently remaining active.
+          # Wrangler can print non-JSON warnings before its --json payload.
+          # Capture stdout and extract the first valid JSON document instead of
+          # assuming byte 0 is always `{` or `[`. This prevents JSONDecodeError
+          # when Wrangler reports a configuration warning before the payload.
+          npx --yes wrangler@4.128.0 versions list --config wrangler.toml --json > /tmp/worker-versions.raw
           python3 - "$WORKER_VERSION_TAG" <<'PY'
-          import json,sys
+          import json,sys,re
           tag=sys.argv[1]
-          data=json.load(open('/tmp/worker-versions.json',encoding='utf-8'))
+          raw=open('/tmp/worker-versions.raw',encoding='utf-8',errors='replace').read()
+          raw=re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', raw)
+          decoder=json.JSONDecoder()
+          data=None
+          for i,ch in enumerate(raw):
+              if ch not in '[{':
+                  continue
+              try:
+                  data,_=decoder.raw_decode(raw[i:])
+                  break
+              except json.JSONDecodeError:
+                  continue
+          if data is None:
+              raise SystemExit('ERROR: Wrangler versions list did not contain a valid JSON payload')
           items=data.get('items', data if isinstance(data,list) else [])
           matches=[x for x in items if x.get('tag')==tag]
           assert len(matches)==1, f'ERROR: Expected exactly one uploaded Worker version for tag {tag}; found {len(matches)}'
@@ -344,15 +376,32 @@ jobs:
           PY
           WORKER_VERSION_ID="$(cat /tmp/worker-version-id.txt)"
 
+          # Cloudflare's documented non-interactive form accepts VERSION-ID@100%.
+          # Retry the same immutable promotion if the platform is still serving
+          # an older deployment; no dashboard action is required.
           promoted=false
           for attempt in 1 2 3; do
             echo "PROMOTION ATTEMPT $attempt/3: $WORKER_VERSION_ID@100%"
             npx --yes wrangler@4.128.0 versions deploy --config wrangler.toml "${WORKER_VERSION_ID}@100%" --message "MY SHOP V-$SOURCE_VERSION run $GITHUB_RUN_ID AUTO-PROMOTE 100%" -y
-            npx --yes wrangler@4.128.0 deployments status --config wrangler.toml --json | tee /tmp/worker-deployment-status.json
+            npx --yes wrangler@4.128.0 deployments status --config wrangler.toml --json > /tmp/worker-deployment-status.raw
             if python3 - "$WORKER_VERSION_ID" <<'PY'
-          import json,sys
+          import json,sys,re
           target=sys.argv[1]
-          data=json.load(open('/tmp/worker-deployment-status.json',encoding='utf-8'))
+          raw=open('/tmp/worker-deployment-status.raw',encoding='utf-8',errors='replace').read()
+          raw=re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', raw)
+          decoder=json.JSONDecoder()
+          data=None
+          for i,ch in enumerate(raw):
+              if ch not in '[{':
+                  continue
+              try:
+                  data,_=decoder.raw_decode(raw[i:])
+                  break
+              except json.JSONDecodeError:
+                  continue
+          if data is None:
+              print('ERROR: Wrangler deployment status did not contain a valid JSON payload')
+              raise SystemExit(1)
           versions=data.get('versions', data.get('deployment',{}).get('versions', []))
           if isinstance(versions,dict):
               versions=[versions]
@@ -390,6 +439,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release/cloudflare
+          # Preserve non-200 response bodies for diagnostics and tolerate only short
+          # propagation windows. The JSON version check below still rejects older V-numbers.
           probe() {
             local url="$1" out="$2"
             local i status
@@ -529,4 +580,9 @@ jobs:
       - name: Upload exactly ONE final APK plus checksum
         uses: actions/upload-artifact@v4
         with:
-          name: MY
+          name: MY-SHOP-FINAL-V-${{ env.SOURCE_VERSION }}
+          path: |
+            release/MY_SHOP_FINAL_RELEASE.apk
+            release/MY_SHOP_FINAL_RELEASE.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
