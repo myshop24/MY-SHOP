@@ -1,0 +1,45 @@
+name: MY SHOP OWNER SIGNING KEY BACKUP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export-signing-key:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Restore existing MY SHOP signing key
+        uses: actions/cache@v4
+        with:
+          path: .signing
+          key: my-shop-release-signing-v1
+
+      - name: Verify signing key exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .signing/myshop-release.jks
+          echo "MY SHOP signing key found."
+
+      - name: Create encrypted owner backup
+        shell: bash
+        env:
+          BACKUP_PASSWORD: ${{ secrets.MYSHOP_KEY_BACKUP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "${BACKUP_PASSWORD:-}"
+          openssl enc -aes-256-cbc -salt -pbkdf2 \
+            -in .signing/myshop-release.jks \
+            -out myshop-release.jks.enc \
+            -pass env:BACKUP_PASSWORD
+
+      - name: Upload encrypted backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: MY-SHOP-OWNER-SIGNING-KEY-BACKUP
+          path: myshop-release.jks.enc
+          retention-days: 1
+          if-no-files-found: error
